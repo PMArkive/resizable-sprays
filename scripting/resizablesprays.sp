@@ -19,6 +19,9 @@
 #include <sdktools>
 #include <filenetmessages>
 
+#pragma newdecls required
+#pragma semicolon 1
+
 // TODO: move this to a separate file
 char g_vmtTemplate[512] = "LightmappedGeneric\n\
 {\n\
@@ -41,70 +44,85 @@ char g_vmtTemplate[512] = "LightmappedGeneric\n\
 \t}\n\
 } ";
 
+float g_fClientLastSprayed[MAXPLAYERS + 1];
+
 ConVar cv_iMaxSprayDistance;
-ConVar cv_fDefaultScale;
-ConVar cv_fDelay;
+ConVar cv_fMaxSprayScale;
+ConVar cv_fSprayDelay;
+ConVar cv_sAdminFlags;
+ConVar cv_bUseBSPDecals;
+ConVar cv_fDecalFrequency;
 
 public Plugin myinfo =  
 {  
-	name = "Resizable sprays",  
+	name = "Resizable Sprays",  
 	author = "Sappykun",  
 	description = "Enhances default sprays to allow for scaling.",  
-	version = "0.0.1",
+	version = "0.0.3",
 	url = ""
 }  
 
 
 public void OnPluginStart()
 {
-	RegAdminCmd("sm_spray", Command_Spray, 0, "Places a repeatable, scalable version of your spray.");
+	RegConsoleCmd("sm_spray", Command_Spray, "Places a repeatable, scalable version of your spray.");
    
-	cv_iMaxSprayDistance = CreateConVar("cspr_maxspraydistance", "0", "Max range for placing decals. 0 is infinite range", FCVAR_NONE, true, 0.0, false);
-	cv_fDefaultScale = CreateConVar("cspr_defaultsprayscale", "0.25", "Default scale for sprays. Depends on dimensions of your spray.\nFor reference, a 512x512 spray at 0.25 scale will be 128x128\nhammer units tall, double that of a normal 64x64 spray.", FCVAR_NONE, true, 0.0, false, 0.0);
-	cv_fDelay = CreateConVar("cspr_delay", "0.5", "Time to give to send out a VMT file. Setting this too low will cause material loading errors.", FCVAR_NONE, true, 0.0, false, 0.0);
-	AutoExecConfig(true, "plugin.customsprays");
+	cv_iMaxSprayDistance = CreateConVar("rspr_maxspraydistance", "128", "Max range for placing decals. 0 is infinite range", FCVAR_NONE, true, 0.0, false);
+	cv_fMaxSprayScale = CreateConVar("rspr_maxsprayscale", "0.20", "Maximum scale for sprays. Actual size depends on dimensions of your spray.\nFor reference, a 512x512 spray at 0.25 scale will be 128x128\nhammer units tall, double that of a normal 64x64 spray.", FCVAR_NONE, true, 0.0, false, 0.0);
+	cv_fSprayDelay = CreateConVar("rspr_delay", "0.5", "Time to give to send out a VMT file. Setting this too low\nwill cause material loading errors on clients.", FCVAR_NONE, true, 0.0, false, 0.0);
+	cv_sAdminFlags = CreateConVar("rspr_adminflags", "b", "Admin flags required to bypass restrictions", FCVAR_NONE, false, 0.0, false, 0.0);
+	cv_bUseBSPDecals = CreateConVar("rspr_usebspdecals", "0", "Use BSP (permanent) decals over world (temporary) decals.\nAdmins only. Not fully tested, may cause crashes. Use at your own risk.", FCVAR_NONE, true, 0.0, true, 1.0);
+	cv_fDecalFrequency = CreateConVar("rspr_decalfrequency", "0.5", "Spray frequency for non-admins. 0 is no delay.", FCVAR_NONE, true, 0.0, false);
+
+	AutoExecConfig(true, "plugin.resizablesprays");
 }
 
 public Action Command_Spray(int client, int args) 
 {
 	float scale;
 	
+	if (!IsValidClient(client))
+		return Plugin_Handled;
+		
+	if (GetGameTime() - g_fClientLastSprayed[client] < cv_fDecalFrequency.FloatValue) 
+		return Plugin_Handled;
+	g_fClientLastSprayed[client] = GetGameTime();
+	
 	if (args > 0) {
 		if (args != 1) {
-			ReplyToCommand(client, "Usage: sm_spray [desired scale]", args);
-			return;
+			ReplyToCommand(client, "Usage: sm_spray [desired_scale]", args);
+			return Plugin_Handled;
 		}
 		
 		char arg1[64]; GetCmdArg(1, arg1, sizeof(arg1));
 		scale = StringToFloat(arg1);
+		
+		char adminFlagsBuffer[16]; cv_sAdminFlags.GetString(adminFlagsBuffer, sizeof(adminFlagsBuffer));
+		if (scale > cv_fMaxSprayScale.FloatValue && !CheckCommandAccess(client, "", ReadFlagString(adminFlagsBuffer), false))
+			scale = cv_fMaxSprayScale.FloatValue;
 	}
 	else {
-		scale = cv_fDefaultScale.FloatValue;
+		scale = cv_fMaxSprayScale.FloatValue;
 	}
 	
 	char materialName[32];
 	WriteVMT(client, scale, materialName, 32);
 	
-	// We need to give the players time to download the VMT before we precache it
-	// TODO: Perform a more robust check
-	DataPack pack;
-	CreateDataTimer(cv_fDelay.FloatValue, Timer_PrecacheAndSprayDecal, pack);
-	pack.WriteCell(client);
-	pack.WriteString(materialName);
+	float fClientEyeViewPoint[3];
+	if (CalculateClientEyeViewPoint(client, fClientEyeViewPoint)) {
+		// We need to give the players time to download the VMT before we precache it
+		// TODO: Perform a more robust check. Might need to replace filenetmessages
+		// with latedownloads
+		DataPack pack;
+		CreateDataTimer(cv_fSprayDelay.FloatValue, Timer_PrecacheAndSprayDecal, pack);
+		pack.WriteCell(client);
+		pack.WriteCell(fClientEyeViewPoint[0]);
+		pack.WriteCell(fClientEyeViewPoint[1]);
+		pack.WriteCell(fClientEyeViewPoint[2]);
+		pack.WriteString(materialName);	
+	}
 	
-}
-
-public Action Timer_PrecacheAndSprayDecal(Handle timer, DataPack pack)
-{
-	int client;
-	char materialName[32];
-	
-	pack.Reset();
-	client = pack.ReadCell();
-	pack.ReadString(materialName, sizeof(materialName));
-	
-	int precacheId = PrecacheDecal(materialName, false);
-	Spray(client, precacheId);
+	return Plugin_Handled;
 }
 
 /*
@@ -129,7 +147,7 @@ public void WriteVMT(int client, float scale, char[] buffer, int buffersize)
 	if (!FileExists(filename, false)) {
 		File vmt = OpenFile(filename, "w+", false);
 		if (vmt != null)
-			WriteFileString(vmt, data, false)
+			WriteFileString(vmt, data, false);
 		CloseHandle(vmt);
 	}
 	
@@ -142,40 +160,71 @@ public void WriteVMT(int client, float scale, char[] buffer, int buffersize)
 	TE_WriteNum("m_nPlayer", client);
 	TE_SendToAll();
 	
-	// Send the material file to all clients
+	// Send file to client
 	for (int c = 1; c <= MaxClients; c++) {
-		if (IsValidClient(c)) { 
+		if (IsValidClient(c)) {
 			FNM_SendFile(c, filename);
 		}
 	}
 }
 
-public void Spray(int client, int precacheId)
-{	
-	if (!IsValidClient(client) || !IsPlayerAlive(client))
-		return;
-
-	float fClientEyePosition[3];
-	GetClientEyePosition(client, fClientEyePosition);
-
+public Action Timer_PrecacheAndSprayDecal(Handle timer, DataPack pack)
+{
+	int client;
 	float fClientEyeViewPoint[3];
-	GetPlayerEyeViewPoint(client, fClientEyeViewPoint);
-
-	float fVector[3];
-	MakeVectorFromPoints(fClientEyeViewPoint, fClientEyePosition, fVector);
-
-	if (cv_iMaxSprayDistance.IntValue > 0 && GetVectorLength(fVector) > cv_iMaxSprayDistance.IntValue)
-		return;
+	char materialName[32];
 	
-	TE_Start("BSP Decal");
-	TE_WriteVector("m_vecOrigin", fClientEyeViewPoint);
-	TE_WriteNum("m_nEntity", 0);
-	TE_WriteNum("m_nIndex", precacheId);
-	TE_SendToAll();
+	pack.Reset();
+	client = pack.ReadCell();
+	fClientEyeViewPoint[0] = pack.ReadCell();
+	fClientEyeViewPoint[1] = pack.ReadCell();
+	fClientEyeViewPoint[2] = pack.ReadCell();
+	pack.ReadString(materialName, sizeof(materialName));
+	
+	int precacheId = PrecacheDecal(materialName, false);
+	Spray(client, precacheId, fClientEyeViewPoint);
+}
+
+
+public void Spray(int client, int precacheId, float fClientEyeViewPoint[3])
+{	
+	char adminFlagsBuffer[16]; cv_sAdminFlags.GetString(adminFlagsBuffer, sizeof(adminFlagsBuffer));
+	if (cv_bUseBSPDecals.BoolValue && CheckCommandAccess(client, "", ReadFlagString(adminFlagsBuffer), false)) {		
+		TE_Start("BSP Decal");
+		TE_WriteVector("m_vecOrigin", fClientEyeViewPoint);
+		TE_WriteNum("m_nEntity", 0);
+		TE_WriteNum("m_nIndex", precacheId);
+		TE_SendToAll();
+	} else {
+		TE_Start("World Decal");
+		TE_WriteVector("m_vecOrigin", fClientEyeViewPoint);
+		TE_WriteNum("m_nIndex", precacheId);
+		TE_SendToAll();
+	}
 
 	EmitSoundToAll("player/sprayer.wav", client, SNDCHAN_AUTO, SNDLEVEL_NORMAL, SND_NOFLAGS, 0.6);
 
 	return;
+}
+
+public bool CalculateClientEyeViewPoint(int client, float fClientEyeViewPoint[3]) 
+{
+	if (!IsValidClient(client) || !IsPlayerAlive(client))
+		return false;
+
+	GetPlayerEyeViewPoint(client, fClientEyeViewPoint);
+
+	float fClientEyePosition[3];
+	GetClientEyePosition(client, fClientEyePosition);
+
+	float fVector[3];
+	MakeVectorFromPoints(fClientEyeViewPoint, fClientEyePosition, fVector);
+
+	char adminFlagsBuffer[16]; cv_sAdminFlags.GetString(adminFlagsBuffer, sizeof(adminFlagsBuffer));
+	if (GetVectorLength(fVector) > cv_iMaxSprayDistance.IntValue > 0 && !CheckCommandAccess(client, "", ReadFlagString(adminFlagsBuffer), false))
+		return false;
+
+	return true;
 }
 
 stock bool GetPlayerEyeViewPoint(int iClient, float fPosition[3])
@@ -202,7 +251,7 @@ public bool TraceEntityFilterPlayer(int iEntity, int iContentsMask)
 	return iEntity > MaxClients;
 }
 
-stock bool IsValidClient(client, bool nobots = true)
+stock bool IsValidClient(int client, bool nobots = true)
 { 
     if (client <= 0 || client > MaxClients || !IsClientConnected(client) || (nobots && IsFakeClient(client)))
     {
