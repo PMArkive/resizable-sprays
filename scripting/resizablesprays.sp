@@ -62,7 +62,6 @@ public Plugin myinfo =
 	url = ""
 }  
 
-
 public void OnPluginStart()
 {
 	RegConsoleCmd("sm_spray", Command_Spray, "Places a repeatable, scalable version of your spray.");
@@ -75,6 +74,11 @@ public void OnPluginStart()
 	cv_fDecalFrequency = CreateConVar("rspr_decalfrequency", "0.5", "Spray frequency for non-admins. 0 is no delay.", FCVAR_NONE, true, 0.0, false);
 
 	AutoExecConfig(true, "plugin.resizablesprays");
+}
+
+public void OnClientConnected(int client)
+{
+	g_fClientLastSprayed[client] = 0.0;
 }
 
 public Action Command_Spray(int client, int args) 
