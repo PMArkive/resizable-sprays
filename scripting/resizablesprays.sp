@@ -49,13 +49,19 @@ ConVar cv_fMaxSprayScale;
 ConVar cv_iMaxSprayDistance;
 ConVar cv_fDecalFrequency;
 
+#define PLUGIN_NAME "Resizable Sprays"
+#define PLUGIN_DESC "Extends default sprays to allow for scaling and spamming"
+#define PLUGIN_AUTHOR "Sappykun"
+#define PLUGIN_VERSION "1.0.0"
+#define PLUGIN_URL ""
+
 public Plugin myinfo =
 {
-	name = "Resizable Sprays",
-	author = "Sappykun",
-	description = "Enhances default sprays to allow for scaling.",
-	version = "0.0.4",
-	url = ""
+	name = PLUGIN_NAME,
+	description = PLUGIN_DESC,
+	author = PLUGIN_AUTHOR,
+	version = PLUGIN_VERSION,
+	url = PLUGIN_URL
 }
 
 public void OnPluginStart()
