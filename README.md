@@ -10,8 +10,7 @@ A Sourcemod plugin that allows you to place your spray as many times as you want
 
 ## DEPENDENCIES
 
-FileNetMessages (Send / Request Files from clients)
-https://forums.alliedmods.net/showthread.php?t=233549
+[FileNetMessages (Send / Request Files from clients)](https://forums.alliedmods.net/showthread.php?t=233549)
 
 ## COMMANDS
 
