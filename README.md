@@ -12,7 +12,7 @@ A Sourcemod plugin that allows you to place your spray as many times as you want
 
 `sm_spray` - Places a "world" decal. This is the default (and safer) option. World sprays can only be placed on worldspawn (non-entity) brushes, and is controlled by the client's `r_decals` cvar.  Placing too many of these will remove the oldest one.
 
-`sm_bspray` - Places a "BSP" decal. These can be placed on any valid brush entity and do not decay. May cause issues if they are spammed on a single surface.
+`sm_bspray` - Places a "BSP" decal. These can be placed on any valid brush entity and do not decay. May cause issues if they are spammed on a single surface.  If the player using this command does not have the flags defined by `rspr_adminflags`, using this command will be equivalent to `sm_spray`.
 
 ## CVARS
 
