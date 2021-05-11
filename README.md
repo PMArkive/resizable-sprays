@@ -8,6 +8,11 @@ A Sourcemod plugin that allows you to place your spray as many times as you want
 - Place sprays on brush entities similar to Goldsrc
 - Dynamic resizing of player sprays
 
+## DEPENDENCIES
+
+FileNetMessages (Send / Request Files from clients)
+https://forums.alliedmods.net/showthread.php?t=233549
+
 ## COMMANDS
 
 `sm_spray` - Places a "world" decal. This is the default (and safer) option. World sprays can only be placed on worldspawn (non-entity) brushes, and is controlled by the client's `r_decals` cvar.  Placing too many of these will remove the oldest one.
@@ -30,4 +35,5 @@ A Sourcemod plugin that allows you to place your spray as many times as you want
 
 - Find a way to keep track of and remove decals
 - Implement a spray limit per map, ideally using a queue system to remove the oldest placed spray with the newest one
+- Potentially replace FileNetMessages with Late Downloads since it is apparently able to tell when a client has downloaded a file. Just need to figure out how to compile it for non-CS:GO engines.
 - General code optimization and cleanup
