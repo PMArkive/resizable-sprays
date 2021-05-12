@@ -19,6 +19,25 @@
 #pragma newdecls required
 #pragma semicolon 1
 
+#define PLUGIN_NAME "Resizable Sprays"
+#define PLUGIN_DESC "Extends default sprays to allow for scaling and spamming"
+#define PLUGIN_AUTHOR "Sappykun"
+#define PLUGIN_VERSION "1.1.0"
+#define PLUGIN_URL ""
+
+#define DEBUG 1
+
+enum struct Spray {
+	int iPrecache;
+	int iClient;
+	int iEntity;
+	int iHitbox;
+	int iDecalType;
+	float fScale;
+	float fPosition[3];
+	char sMaterialName[64];
+}
+
 // TODO: move this to a separate file
 char g_vmtTemplate[512] = "LightmappedGeneric\n\
 {\n\
@@ -39,7 +58,7 @@ char g_vmtTemplate[512] = "LightmappedGeneric\n\
 \t\t\tanimatedtextureframerate 5\n\
 \t\t}\n\
 \t}\n\
-} ";
+}";
 
 float g_fClientLastSprayed[MAXPLAYERS + 1];
 
@@ -48,12 +67,6 @@ ConVar cv_fSprayDelay;
 ConVar cv_fMaxSprayScale;
 ConVar cv_iMaxSprayDistance;
 ConVar cv_fDecalFrequency;
-
-#define PLUGIN_NAME "Resizable Sprays"
-#define PLUGIN_DESC "Extends default sprays to allow for scaling and spamming"
-#define PLUGIN_AUTHOR "Sappykun"
-#define PLUGIN_VERSION "1.0.0"
-#define PLUGIN_URL ""
 
 public Plugin myinfo =
 {
@@ -66,7 +79,7 @@ public Plugin myinfo =
 
 public void OnPluginStart()
 {
-	RegConsoleCmd("sm_spray", Command_Spray, "Places a repeatable, scalable version of your spray as a world decal.");
+	RegConsoleCmd("sm_spray", Command_Spray, "Places a repeatable, scalable version of your spray as a decal.");
 	RegConsoleCmd("sm_bspray", Command_Spray, "Places a repeatable, scalable version of your spray as a BSP decal.");
 
 	CreateConVar("rspr_version", PLUGIN_VERSION, "Resizable Sprays version. Don't touch this.", FCVAR_NOTIFY|FCVAR_DONTRECORD|FCVAR_SPONLY);
@@ -95,18 +108,14 @@ public void OnClientConnected(int client)
 */
 public Action Command_Spray(int client, int args)
 {
-	float scale;
-	float fClientEyeViewPoint[3];
-	int iEntity;
-	char materialName[32];
-	int decalType = 0;
+	Spray spray;
+	spray.iClient = client;
 
 	if (!IsValidClient(client))
 		return Plugin_Handled;
 
 	if (GetGameTime() - g_fClientLastSprayed[client] < cv_fDecalFrequency.FloatValue && !IsAdmin(client))
 		return Plugin_Handled;
-
 	g_fClientLastSprayed[client] = GetGameTime();
 
 	if (args > 0) {
@@ -116,36 +125,37 @@ public Action Command_Spray(int client, int args)
 		}
 
 		char arg1[64]; GetCmdArg(1, arg1, sizeof(arg1));
-		scale = StringToFloat(arg1);
+		spray.fScale = StringToFloat(arg1);
 
-		if (scale > cv_fMaxSprayScale.FloatValue && !IsAdmin(client))
-			scale = cv_fMaxSprayScale.FloatValue;
+		if (spray.fScale > cv_fMaxSprayScale.FloatValue && !IsAdmin(client))
+			spray.fScale = cv_fMaxSprayScale.FloatValue;
 	}
 	else {
-		scale = cv_fMaxSprayScale.FloatValue;
+		spray.fScale = cv_fMaxSprayScale.FloatValue;
 	}
 
 	char arg0[64]; GetCmdArg(0, arg0, sizeof(arg0));
 	if (StrEqual(arg0, "sm_bspray") && IsAdmin(client))
-		decalType = 1;
+		spray.iDecalType = 1;
 
-	iEntity = CalculateClientEyeViewPoint(client, fClientEyeViewPoint);
+	CalculateSprayPosition(spray);
 
-	if (iEntity > -1) {
-		WriteVMT(client, scale, materialName, 32);
+	if (spray.iEntity > -1) {
+		WriteVMT(spray);
 
 		// We need to give the players time to download the VMT before we precache it
 		// TODO: Perform a more robust check. Might need to replace filenetmessages
 		// with latedownloads
 		DataPack pack;
 		CreateDataTimer(cv_fSprayDelay.FloatValue, Timer_PrecacheAndSprayDecal, pack);
-		pack.WriteCell(client);
-		pack.WriteCell(iEntity);
-		pack.WriteCell(fClientEyeViewPoint[0]);
-		pack.WriteCell(fClientEyeViewPoint[1]);
-		pack.WriteCell(fClientEyeViewPoint[2]);
-		pack.WriteString(materialName);
-		pack.WriteCell(decalType);
+		pack.WriteCell(spray.iClient);
+		pack.WriteCell(spray.iEntity);
+		pack.WriteCell(spray.fPosition[0]);
+		pack.WriteCell(spray.fPosition[1]);
+		pack.WriteCell(spray.fPosition[2]);
+		pack.WriteCell(spray.iHitbox);
+		pack.WriteString(spray.sMaterialName);
+		pack.WriteCell(spray.iDecalType);
 	}
 
 	return Plugin_Handled;
@@ -157,18 +167,18 @@ public Action Command_Spray(int client, int args)
 	@param scale of decal for generated material
 	@param buffer for material name
 */
-public void WriteVMT(int client, float scale, char[] buffer, int buffersize)
+public void WriteVMT(Spray spray)
 {
-	char spray[12]; GetPlayerDecalFile(client, spray, sizeof(spray));
+	char playerdecalfile[12]; GetPlayerDecalFile(spray.iClient, playerdecalfile, sizeof(playerdecalfile));
 
-	char data[512]; Format(data, 512, g_vmtTemplate, spray, scale);
+	char data[512]; Format(data, 512, g_vmtTemplate, playerdecalfile, spray.fScale);
 
 	// Get rid of the period in float representation. Source engine doesn't like
 	// loading files with more than one . in the filename.
-	char scaleString[16]; Format(scaleString, 16, "%.4f", scale); ReplaceString(scaleString, 16, ".", "-", false);
+	char scaleString[16]; Format(scaleString, 16, "%.4f", spray.fScale); ReplaceString(scaleString, 16, ".", "-", false);
 
-	Format(buffer, buffersize, "customsprays/%s_%s", spray, scaleString);
-	char filename[128]; Format(filename, 128, "materials/%s.vmt", buffer);
+	Format(spray.sMaterialName, sizeof(spray.sMaterialName), "resizablesprays/%s_%s", playerdecalfile, scaleString);
+	char filename[128]; Format(filename, 128, "materials/%s.vmt", spray.sMaterialName);
 
 	if (!FileExists(filename, false)) {
 		File vmt = OpenFile(filename, "w+", false);
@@ -177,15 +187,13 @@ public void WriteVMT(int client, float scale, char[] buffer, int buffersize)
 		CloseHandle(vmt);
 	}
 
-	// TODO: this will place sprays if a valid surface exists at 0, 0, 0
-	// eg. midpoint of ctf_doublecross in TF2. Find a better starting vector
-	float empty[3] =  { 0.0, 0.0, 0.0 };
+	float empty[3] =  { -16384.0, -16384.0, -16384.0 };
 
 	// Get clients to download spray
 	TE_Start("Player Decal");
 	TE_WriteVector("m_vecOrigin", empty);
 	TE_WriteNum("m_nEntity", 0);
-	TE_WriteNum("m_nPlayer", client);
+	TE_WriteNum("m_nPlayer", spray.iClient);
 	TE_SendToAll();
 
 	// Send file to client
@@ -203,9 +211,10 @@ public Action Timer_PrecacheAndSprayDecal(Handle timer, DataPack pack)
 {
 	int client;
 	int iEntity;
+	int iHitbox;
+	int decalType;
 	float fClientEyeViewPoint[3];
 	char materialName[32];
-	int decalType;
 
 	pack.Reset();
 	client = pack.ReadCell();
@@ -213,11 +222,53 @@ public Action Timer_PrecacheAndSprayDecal(Handle timer, DataPack pack)
 	fClientEyeViewPoint[0] = pack.ReadCell();
 	fClientEyeViewPoint[1] = pack.ReadCell();
 	fClientEyeViewPoint[2] = pack.ReadCell();
+	iHitbox = pack.ReadCell();
 	pack.ReadString(materialName, sizeof(materialName));
 	decalType = pack.ReadCell();
 
 	int precacheId = PrecacheDecal(materialName, false);
-	Spray(client, precacheId, iEntity, fClientEyeViewPoint, decalType);
+	PlaceSpray(client, precacheId, iEntity, fClientEyeViewPoint, iHitbox, decalType);
+}
+
+
+
+
+/*
+	Calculates where a client is looking and what entity they're looking at
+	@param client id
+	@param vector respresenting where client is looking
+	@return entity client is looking at. 0 means worldspawn (non-entity brushes)
+	@error -1 if entity is out of range
+	Credit to SM Franug for the original code
+	https://forums.alliedmods.net/showthread.php?p=2118030
+*/
+public void CalculateSprayPosition(Spray spray)
+{
+	float fAngles[3];
+	float fOrigin[3];
+	float fVector[3];
+
+	if (!IsValidClient(spray.iClient) || !IsPlayerAlive(spray.iClient)) {
+		spray.iEntity = -1;
+		return;
+	}
+
+	GetClientEyeAngles(spray.iClient, fAngles);
+	GetClientEyePosition(spray.iClient, fOrigin);
+
+	Handle hTrace = TR_TraceRayFilterEx(fOrigin, fAngles, MASK_SHOT, RayType_Infinite, TraceEntityFilterPlayer);
+	if (TR_DidHit(hTrace))
+		TR_GetEndPosition(spray.fPosition, hTrace);
+
+	spray.iEntity = TR_GetEntityIndex(hTrace);
+	spray.iHitbox = TR_GetHitBoxIndex(hTrace);
+
+	CloseHandle(hTrace);
+
+	MakeVectorFromPoints(fAngles, fOrigin, fVector);
+
+	if (GetVectorLength(fVector) > cv_iMaxSprayDistance.IntValue > 0 && !IsAdmin(spray.iClient))
+		spray.iEntity = -1;
 }
 
 /*
@@ -228,15 +279,18 @@ public Action Timer_PrecacheAndSprayDecal(Handle timer, DataPack pack)
 	@param position to place decal
 	@param type of decal to place. 0 is world decal, 1 is BSP decal
 */
-public void Spray(int client, int precacheId, int iEntity, float fClientEyeViewPoint[3], int decalType)
+public void PlaceSpray(int client, int precacheId, int iEntity, float fClientEyeViewPoint[3], int hitbox, int decalType)
 {
 	//char classname[64]; GetEdictClassname(iEntity, classname, sizeof(classname));
 	//PrintToChatAll("Looking at entity %i with classname %s.", iEntity, classname);
 
 	switch (decalType) {
 		case 0: {
-			TE_Start("World Decal");
+			TE_Start("Entity Decal");
 			TE_WriteVector("m_vecOrigin", fClientEyeViewPoint);
+			TE_WriteVector("m_vecStart", fClientEyeViewPoint);
+			TE_WriteNum("m_nEntity", iEntity);
+			TE_WriteNum("m_nHitbox", hitbox);
 			TE_WriteNum("m_nIndex", precacheId);
 			TE_SendToAll();
 		}
@@ -254,60 +308,6 @@ public void Spray(int client, int precacheId, int iEntity, float fClientEyeViewP
 	return;
 }
 
-/*
-	Calculates where a client is looking and what entity they're looking at
-	@param client id
-	@param vector respresenting where client is looking
-	@return entity client is looking at. 0 means worldspawn (non-entity brushes)
-	@error -1 if entity is out of range
-	Credit to SM Franug for the original code
-	https://forums.alliedmods.net/showthread.php?p=2118030
-*/
-public int CalculateClientEyeViewPoint(int client, float fClientEyeViewPoint[3])
-{
-	if (!IsValidClient(client) || !IsPlayerAlive(client))
-		return false;
-
-	int ret = GetPlayerEyeViewPoint(client, fClientEyeViewPoint);
-
-	float fClientEyePosition[3];
-	GetClientEyePosition(client, fClientEyePosition);
-
-	float fVector[3];
-	MakeVectorFromPoints(fClientEyeViewPoint, fClientEyePosition, fVector);
-
-	if (GetVectorLength(fVector) > cv_iMaxSprayDistance.IntValue > 0 && !IsAdmin(client))
-		return -1;
-
-	return ret;
-}
-
-/*
-	Finds what a client is looking at
-	@param client id
-	@param vector respresenting where client is looking
-	@return entity client is looking at. 0 means worldspawn (non-entity brushes)
-	@error -1 if entity is out of range
-	Credit to SM Franug for the original code
-	https://forums.alliedmods.net/showthread.php?p=2118030
-*/
-stock int GetPlayerEyeViewPoint(int iClient, float fPosition[3])
-{
-	float fAngles[3];
-	GetClientEyeAngles(iClient, fAngles);
-
-	float fOrigin[3];
-	GetClientEyePosition(iClient, fOrigin);
-
-	Handle hTrace = TR_TraceRayFilterEx(fOrigin, fAngles, MASK_SHOT, RayType_Infinite, TraceEntityFilterPlayer);
-	if (TR_DidHit(hTrace))
-		TR_GetEndPosition(fPosition, hTrace);
-
-	int iEntity = TR_GetEntityIndex(hTrace);
-	CloseHandle(hTrace);
-
-	return iEntity;
-}
 
 public bool TraceEntityFilterPlayer(int iEntity, int iContentsMask)
 {
