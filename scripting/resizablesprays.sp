@@ -28,6 +28,7 @@
 #define DEBUG 1
 
 enum struct Spray {
+	int iSprayer;
 	int iPrecache;
 	int iClient;
 	int iEntity;
@@ -91,6 +92,7 @@ public void OnPluginStart()
 	cv_fDecalFrequency = CreateConVar("rspr_decalfrequency", "0.5", "Spray frequency for non-admins. 0 is no delay.", FCVAR_NONE, true, 0.0, false);
 
 	AutoExecConfig(true, "resizablesprays");
+	LoadTranslations("common.phrases");
 }
 
 /*
@@ -109,6 +111,11 @@ public void OnClientConnected(int client)
 public Action Command_Spray(int client, int args)
 {
 	Spray spray;
+	char arg0[64]; GetCmdArg(0, arg0, sizeof(arg0));
+	char arg1[64]; GetCmdArg(1, arg1, sizeof(arg1));
+	char arg2[64]; GetCmdArg(2, arg2, sizeof(arg2));
+
+	spray.iSprayer = client;
 	spray.iClient = client;
 
 	if (!IsValidClient(client))
@@ -118,23 +125,32 @@ public Action Command_Spray(int client, int args)
 		return Plugin_Handled;
 	g_fClientLastSprayed[client] = GetGameTime();
 
+
 	if (args > 0) {
-		if (args != 1) {
-			ReplyToCommand(client, "Usage: sm_spray [desired_scale]", args);
+		if (!IsAdmin(client) && (args > 1 || !StringToFloatEx(arg1, spray.fScale))) {
+			ReplyToCommand(client, "Usage: %s [desired_scale]", arg0);
 			return Plugin_Handled;
 		}
 
-		char arg1[64]; GetCmdArg(1, arg1, sizeof(arg1));
-		spray.fScale = StringToFloat(arg1);
+		if (IsAdmin(client) && (args > 2 || !StringToFloatEx(arg1, spray.fScale))) {
+			ReplyToCommand(client, "Usage: %s [desired_scale] [user]", arg0);
+			return Plugin_Handled;
+		}
 
-		if (spray.fScale > cv_fMaxSprayScale.FloatValue && !IsAdmin(client))
+		if (IsAdmin(client) && args == 2) {
+			spray.iClient = FindTarget(client, arg2, true, true);
+			if (spray.iClient == -1) {
+				return Plugin_Handled;
+			}
+		}
+
+		if (!IsAdmin(client) && spray.fScale > cv_fMaxSprayScale.FloatValue)
 			spray.fScale = cv_fMaxSprayScale.FloatValue;
 	}
 	else {
 		spray.fScale = cv_fMaxSprayScale.FloatValue;
 	}
 
-	char arg0[64]; GetCmdArg(0, arg0, sizeof(arg0));
 	if (StrEqual(arg0, "sm_bspray") && IsAdmin(client))
 		spray.iDecalType = 1;
 
@@ -148,7 +164,7 @@ public Action Command_Spray(int client, int args)
 		// with latedownloads
 		DataPack pack;
 		CreateDataTimer(cv_fSprayDelay.FloatValue, Timer_PrecacheAndSprayDecal, pack);
-		pack.WriteCell(spray.iClient);
+		pack.WriteCell(spray.iSprayer);
 		pack.WriteCell(spray.iEntity);
 		pack.WriteCell(spray.fPosition[0]);
 		pack.WriteCell(spray.fPosition[1]);
@@ -181,6 +197,10 @@ public void WriteVMT(Spray spray)
 	char filename[128]; Format(filename, 128, "materials/%s.vmt", spray.sMaterialName);
 
 	if (!FileExists(filename, false)) {
+
+		if (!DirExists("materials/resizablesprays", false))
+			CreateDirectory("materials/resizablesprays", 511, false); // 511 decimal = 755 octal
+
 		File vmt = OpenFile(filename, "w+", false);
 		if (vmt != null)
 			WriteFileString(vmt, data, false);
@@ -230,9 +250,6 @@ public Action Timer_PrecacheAndSprayDecal(Handle timer, DataPack pack)
 	PlaceSpray(client, precacheId, iEntity, fClientEyeViewPoint, iHitbox, decalType);
 }
 
-
-
-
 /*
 	Calculates where a client is looking and what entity they're looking at
 	@param client id
@@ -248,13 +265,13 @@ public void CalculateSprayPosition(Spray spray)
 	float fOrigin[3];
 	float fVector[3];
 
-	if (!IsValidClient(spray.iClient) || !IsPlayerAlive(spray.iClient)) {
+	if (!IsValidClient(spray.iSprayer) || !IsPlayerAlive(spray.iSprayer)) {
 		spray.iEntity = -1;
 		return;
 	}
 
-	GetClientEyeAngles(spray.iClient, fAngles);
-	GetClientEyePosition(spray.iClient, fOrigin);
+	GetClientEyeAngles(spray.iSprayer, fAngles);
+	GetClientEyePosition(spray.iSprayer, fOrigin);
 
 	Handle hTrace = TR_TraceRayFilterEx(fOrigin, fAngles, MASK_SHOT, RayType_Infinite, TraceEntityFilterPlayer);
 	if (TR_DidHit(hTrace))
@@ -267,7 +284,7 @@ public void CalculateSprayPosition(Spray spray)
 
 	MakeVectorFromPoints(fAngles, fOrigin, fVector);
 
-	if (GetVectorLength(fVector) > cv_iMaxSprayDistance.IntValue > 0 && !IsAdmin(spray.iClient))
+	if (GetVectorLength(fVector) > cv_iMaxSprayDistance.IntValue > 0 && !IsAdmin(spray.iSprayer))
 		spray.iEntity = -1;
 }
 
