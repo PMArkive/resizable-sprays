@@ -23,7 +23,7 @@
 #define PLUGIN_DESC "Extends default sprays to allow for scaling and spamming"
 #define PLUGIN_AUTHOR "Sappykun"
 #define PLUGIN_VERSION "1.1.0"
-#define PLUGIN_URL ""
+#define PLUGIN_URL "https://forums.alliedmods.net/showthread.php?t=332418"
 
 #define DEBUG 1
 
