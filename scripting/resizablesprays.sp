@@ -22,33 +22,21 @@
 #define PLUGIN_NAME "Resizable Sprays"
 #define PLUGIN_DESC "Extends default sprays to allow for scaling and spamming"
 #define PLUGIN_AUTHOR "Sappykun"
-#define PLUGIN_VERSION "1.1.1"
+#define PLUGIN_VERSION "2.0.0"
 #define PLUGIN_URL "https://forums.alliedmods.net/showthread.php?t=332418"
 
-#define DEBUG 1
-
-enum struct Spray {
-	int iSprayer;
-	int iPrecache;
-	int iClient;
-	int iEntity;
-	int iHitbox;
-	int iDecalType;
-	float fScale;
-	float fPosition[3];
-	char sMaterialName[64];
-}
-
 // TODO: move this to a separate file
-char g_vmtTemplate[512] = "LightmappedGeneric\n\
+char g_vmtTemplate[512] = "Sprite\n\
 {\n\
 \t$basetexture \"temp/%s\"\n\
+\t$decalscale %.4f\n\
+\t$spriteorientation 4\n\
+\t$spriteorigin \"[ 0.50 0.50 ]\"\n\
 \t$vertexcolor 1\n\
 \t$vertexalpha 1\n\
 \t$translucent 1\n\
 \t$decal 1\n\
-\tdecalsecondpass 1\n\
-\t$decalscale %.4f\n\
+\t$decalsecondpass 1\n\
 \tProxies\n\
 \t{\n\
 \t\tPlayerLogo {}\n\
@@ -61,14 +49,29 @@ char g_vmtTemplate[512] = "LightmappedGeneric\n\
 \t}\n\
 }";
 
-float g_fClientLastSprayed[MAXPLAYERS + 1];
+enum struct Spray {
+	int iPrecache;
+	int iPreviewSprite;
+	int iClient;
+	int iEntity;
+	int iHitbox;
+	int iDecalType;
+	int iPreviewMode;
+	float fScale;
+	float fLastSprayed;
+	float fPosition[3];
+	char sMaterialName[64];
+}
+
+Spray g_Spray[MAXPLAYERS + 1];
 
 ConVar cv_sAdminFlags;
 ConVar cv_fSprayDelay;
 ConVar cv_fMaxSprayScale;
-ConVar cv_fMaxSprayDistance;
+ConVar cv_iMaxSprayDistance;
 ConVar cv_fDecalFrequency;
-ConVar cv_bDebug;
+
+char g_strLogFile[PLATFORM_MAX_PATH];
 
 public Plugin myinfo =
 {
@@ -83,18 +86,26 @@ public void OnPluginStart()
 {
 	RegConsoleCmd("sm_spray", Command_Spray, "Places a repeatable, scalable version of your spray as a decal.");
 	RegConsoleCmd("sm_bspray", Command_Spray, "Places a repeatable, scalable version of your spray as a BSP decal.");
+	RegConsoleCmd("sm_spraypreview", Command_SprayPreview, "Toggles spray preview mode.");
+	//RegConsoleCmd("sm_sprite", Command_Sprite, "Place sprite");
 
 	CreateConVar("rspr_version", PLUGIN_VERSION, "Resizable Sprays version. Don't touch this.", FCVAR_NOTIFY|FCVAR_DONTRECORD|FCVAR_SPONLY);
 
 	cv_sAdminFlags = CreateConVar("rspr_adminflags", "b", "Admin flags required to bypass restrictions", FCVAR_NONE, false, 0.0, false, 0.0);
 	cv_fSprayDelay = CreateConVar("rspr_delay", "0.5", "Time to give to send out a VMT file. Setting this too low\nwill cause material loading errors on clients.", FCVAR_NONE, true, 0.0, false, 0.0);
-	cv_fMaxSprayDistance = CreateConVar("rspr_maxspraydistance", "128.0", "Max range for placing decals. 0 is infinite range", FCVAR_NONE, true, 0.0, false);
+	cv_iMaxSprayDistance = CreateConVar("rspr_maxspraydistance", "128", "Max range for placing decals. 0 is infinite range", FCVAR_NONE, true, 0.0, false);
 	cv_fMaxSprayScale = CreateConVar("rspr_maxsprayscale", "0.20", "Maximum scale for sprays. Actual size depends on dimensions of your spray.\nFor reference, a 512x512 spray at 0.25 scale will be 128x128\nhammer units tall, double that of a normal 64x64 spray.", FCVAR_NONE, true, 0.0, false, 0.0);
 	cv_fDecalFrequency = CreateConVar("rspr_decalfrequency", "0.5", "Spray frequency for non-admins. 0 is no delay.", FCVAR_NONE, true, 0.0, false);
-	cv_bDebug = CreateConVar("rspr_debug", "0", "Debug mode", FCVAR_NONE, true, 0.0, true, 1.0);
 
 	AutoExecConfig(true, "resizablesprays");
 	LoadTranslations("common.phrases");
+
+	char timebuffer[32];
+	FormatTime(timebuffer, sizeof(timebuffer), "%F", GetTime());
+	BuildPath(Path_SM, g_strLogFile, sizeof(g_strLogFile), "logs/rspr_%s.log", timebuffer);
+
+	for (int i = 0; i < sizeof(g_Spray); i++)
+		g_Spray[i].iPreviewSprite = -1;
 }
 
 /*
@@ -102,15 +113,8 @@ public void OnPluginStart()
 */
 public void OnClientConnected(int client)
 {
-	g_fClientLastSprayed[client] = 0.0;
+	g_Spray[client].fLastSprayed = 0.0;
 }
-
-public void OnMapStart()
-{
-	for (int c = 0; c < sizeof(g_fClientLastSprayed); c++)
-		g_fClientLastSprayed[c] = 0.0;
-}
-
 
 /*
 	Handles the !spray and !bspray commands
@@ -119,83 +123,78 @@ public void OnMapStart()
 */
 public Action Command_Spray(int client, int args)
 {
-	Spray spray;
+	LogToFile(g_strLogFile, "Command_Spray: client %i is spraying", client);
+
 	char arg0[64]; GetCmdArg(0, arg0, sizeof(arg0));
 	char arg1[64]; GetCmdArg(1, arg1, sizeof(arg1));
 	char arg2[64]; GetCmdArg(2, arg2, sizeof(arg2));
 
-	spray.iSprayer = client;
-	spray.iClient = client;
+	g_Spray[client].iClient = client;
 
-	if (!IsValidClient(client)) {
-		if (cv_bDebug.BoolValue) LogMessage("Client %i is invalid", client);
+	if (!IsValidClient(client))
 		return Plugin_Handled;
-	}
 
-	if (GetGameTime() - g_fClientLastSprayed[client] < cv_fDecalFrequency.FloatValue && !IsAdmin(client)) {
-		if (cv_bDebug.BoolValue) LogMessage("Client %i is spraying too fast (%0.4f < %0.4f)", client, GetGameTime() - g_fClientLastSprayed[client], cv_fDecalFrequency.FloatValue);
+	if (GetGameTime() - g_Spray[client].fLastSprayed < cv_fDecalFrequency.FloatValue && !IsAdmin(client))
 		return Plugin_Handled;
-	}
-	g_fClientLastSprayed[client] = GetGameTime();
+	g_Spray[client].fLastSprayed = GetGameTime();
+	//g_Spray[client].iPreviewMode = 0;
+	//KillSprite(client);
 
-	if (cv_bDebug.BoolValue) LogMessage("Checking args for player %N", client);
+
+
+	if (StrEqual(arg0, "sm_bspray") && IsAdmin(client))
+		g_Spray[client].iDecalType = 1;
 
 	if (args > 0) {
-		if (!IsAdmin(client) && (args > 1 || !StringToFloatEx(arg1, spray.fScale))) {
+		if (!IsAdmin(client) && (args > 1 || !StringToFloatEx(arg1, g_Spray[client].fScale))) {
 			ReplyToCommand(client, "Usage: %s [desired_scale]", arg0);
 			return Plugin_Handled;
 		}
 
-		if (IsAdmin(client) && (args > 2 || !StringToFloatEx(arg1, spray.fScale))) {
+		if (IsAdmin(client) && (args > 2 || !StringToFloatEx(arg1, g_Spray[client].fScale))) {
 			ReplyToCommand(client, "Usage: %s [desired_scale] [user]", arg0);
 			return Plugin_Handled;
 		}
 
 		if (IsAdmin(client) && args == 2) {
-			spray.iClient = FindTarget(client, arg2, true, true);
-			if (spray.iClient == -1) {
+			g_Spray[client].iClient = FindTarget(client, arg2, true, true);
+			if (g_Spray[client].iClient == -1) {
 				return Plugin_Handled;
 			}
 		}
 
-		if (!IsAdmin(client) && spray.fScale > cv_fMaxSprayScale.FloatValue)
-			spray.fScale = cv_fMaxSprayScale.FloatValue;
+		if (!IsAdmin(client) && g_Spray[client].fScale > cv_fMaxSprayScale.FloatValue)
+			g_Spray[client].fScale = cv_fMaxSprayScale.FloatValue;
 	}
 	else {
-		spray.fScale = cv_fMaxSprayScale.FloatValue;
+		g_Spray[client].fScale = cv_fMaxSprayScale.FloatValue;
 	}
 
-	if (cv_bDebug.BoolValue) LogMessage("Player %N is placing %N's spray at %0.4f scale", client, spray.iClient, spray.fScale);
+	CalculateSprayPosition(client);
 
-	if (StrEqual(arg0, "sm_bspray") && IsAdmin(client)) {
-		if (cv_bDebug.BoolValue) LogMessage("Changing %N's spray to BSP type", client);
-		spray.iDecalType = 1;
-	}
+	if (g_Spray[client].iEntity > -1) {
 
-
-	if (cv_bDebug.BoolValue) LogMessage("Getting position of spray %N", client);
-	CalculateSprayPosition(spray);
-
-	if (spray.iEntity > -1) {
-		WriteVMT(spray);
+		WriteVMT(g_Spray[client]);
 
 		// We need to give the players time to download the VMT before we precache it
 		// TODO: Perform a more robust check. Might need to replace filenetmessages
 		// with latedownloads
-		DataPack pack;
-		CreateDataTimer(cv_fSprayDelay.FloatValue, Timer_PrecacheAndSprayDecal, pack);
-		pack.WriteCell(spray.iSprayer);
-		pack.WriteCell(spray.iEntity);
-		pack.WriteCell(spray.fPosition[0]);
-		pack.WriteCell(spray.fPosition[1]);
-		pack.WriteCell(spray.fPosition[2]);
-		pack.WriteCell(spray.iHitbox);
-		pack.WriteString(spray.sMaterialName);
-		pack.WriteCell(spray.iDecalType);
-	} else {
-		if (cv_bDebug.BoolValue) LogMessage("CalculateSprayPosition reported bad ent for spray %N", client);
+		CreateTimer(cv_fSprayDelay.FloatValue, Timer_PrecacheAndSprayDecal, client);
 	}
 
+	return Plugin_Handled;
+}
+
+public Action Command_SprayPreview(int client, int args)
+{
+	if (g_Spray[client].iPreviewMode > 0) {
+		if (g_Spray[client].iPreviewMode == 2) {
+			g_Spray[client].iPreviewMode = 0;
+			ReplyToCommand(client, "Spray preview mode disabled.");
+		}
+		return Plugin_Handled;
+	}
+	g_Spray[client].iPreviewMode = 2;
 	return Plugin_Handled;
 }
 
@@ -219,7 +218,6 @@ public void WriteVMT(Spray spray)
 	char filename[128]; Format(filename, 128, "materials/%s.vmt", spray.sMaterialName);
 
 	if (!FileExists(filename, false)) {
-
 		if (!DirExists("materials/resizablesprays", false))
 			CreateDirectory("materials/resizablesprays", 511, false); // 511 decimal = 755 octal
 
@@ -249,68 +247,55 @@ public void WriteVMT(Spray spray)
 /*
 	Precaches the freshly-generated VMT file
 */
-public Action Timer_PrecacheAndSprayDecal(Handle timer, DataPack pack)
+public Action Timer_PrecacheAndSprayDecal(Handle timer, int client)
 {
-	int client;
-	int iEntity;
-	int iHitbox;
-	int decalType;
-	float fClientEyeViewPoint[3];
-	char materialName[32];
+	g_Spray[client].iPrecache = PrecacheDecal(g_Spray[client].sMaterialName, false);
 
-	pack.Reset();
-	client = pack.ReadCell();
-	iEntity = pack.ReadCell();
-	fClientEyeViewPoint[0] = pack.ReadCell();
-	fClientEyeViewPoint[1] = pack.ReadCell();
-	fClientEyeViewPoint[2] = pack.ReadCell();
-	iHitbox = pack.ReadCell();
-	pack.ReadString(materialName, sizeof(materialName));
-	decalType = pack.ReadCell();
+	if (g_Spray[client].iPreviewMode == 0)
+		PlaceSpray(client);
+	else {
+		g_Spray[client].iPreviewMode = 2;
+		//CreateSprite(client);
+		PrintToChat(client, "Spray preview mode enabled.");
+	}
 
-	int precacheId = PrecacheDecal(materialName, false);
-	PlaceSpray(client, precacheId, iEntity, fClientEyeViewPoint, iHitbox, decalType);
 }
 
 /*
 	Calculates where a client is looking and what entity they're looking at
 	@param client id
-	@param vector respresenting where client is looking
 	@return entity client is looking at. 0 means worldspawn (non-entity brushes)
 	@error -1 if entity is out of range
 	Credit to SM Franug for the original code
 	https://forums.alliedmods.net/showthread.php?p=2118030
 */
-public void CalculateSprayPosition(Spray spray)
+public void CalculateSprayPosition(int client)
 {
 	float fAngles[3];
 	float fOrigin[3];
 	float fVector[3];
 
-	if (!IsValidClient(spray.iSprayer) || !IsPlayerAlive(spray.iSprayer)) {
-		if (cv_bDebug.BoolValue) LogMessage("CalculateSprayPosition: Client %i is invalid or dead", spray.iSprayer);
-		spray.iEntity = -1;
+	if (!IsValidClient(client) || !IsPlayerAlive(client)) {
+		g_Spray[client].iEntity = -1;
 		return;
 	}
 
-	GetClientEyeAngles(spray.iSprayer, fAngles);
-	GetClientEyePosition(spray.iSprayer, fOrigin);
+	GetClientEyeAngles(client, fAngles);
+	GetClientEyePosition(client, fOrigin);
 
 	Handle hTrace = TR_TraceRayFilterEx(fOrigin, fAngles, MASK_SHOT, RayType_Infinite, TraceEntityFilterPlayer);
 	if (TR_DidHit(hTrace))
-		TR_GetEndPosition(spray.fPosition, hTrace);
+		TR_GetEndPosition(g_Spray[client].fPosition, hTrace);
 
-	spray.iEntity = TR_GetEntityIndex(hTrace);
-	spray.iHitbox = TR_GetHitBoxIndex(hTrace);
+	g_Spray[client].iEntity = TR_GetEntityIndex(hTrace);
+	g_Spray[client].iHitbox = TR_GetHitBoxIndex(hTrace);
 
 	CloseHandle(hTrace);
 
-	MakeVectorFromPoints(fOrigin, spray.fPosition, fVector);
+	MakeVectorFromPoints(g_Spray[client].fPosition, fOrigin, fVector);
 
-	if (GetVectorLength(fVector) > cv_fMaxSprayDistance.FloatValue > 0 && !IsAdmin(spray.iSprayer)) {
-		if (cv_bDebug.BoolValue) LogMessage("CalculateSprayPosition: %N sprayed too far (%0.4f > %0.4f)", spray.iSprayer, GetVectorLength(fVector), cv_fMaxSprayDistance.FloatValue);
-		spray.iEntity = -1;
-	}
+	if (GetVectorLength(fVector) > cv_iMaxSprayDistance.IntValue > 0 && !IsAdmin(client))
+		g_Spray[client].iEntity = -1;
 }
 
 /*
@@ -321,26 +306,26 @@ public void CalculateSprayPosition(Spray spray)
 	@param position to place decal
 	@param type of decal to place. 0 is world decal, 1 is BSP decal
 */
-public void PlaceSpray(int client, int precacheId, int iEntity, float fClientEyeViewPoint[3], int hitbox, int decalType)
+public void PlaceSpray(int client)
 {
 	//char classname[64]; GetEdictClassname(iEntity, classname, sizeof(classname));
 	//PrintToChatAll("Looking at entity %i with classname %s.", iEntity, classname);
 
-	switch (decalType) {
+	switch (g_Spray[client].iDecalType) {
 		case 0: {
 			TE_Start("Entity Decal");
-			TE_WriteVector("m_vecOrigin", fClientEyeViewPoint);
-			TE_WriteVector("m_vecStart", fClientEyeViewPoint);
-			TE_WriteNum("m_nEntity", iEntity);
-			TE_WriteNum("m_nHitbox", hitbox);
-			TE_WriteNum("m_nIndex", precacheId);
+			TE_WriteVector("m_vecOrigin", g_Spray[client].fPosition);
+			TE_WriteVector("m_vecStart", g_Spray[client].fPosition);
+			TE_WriteNum("m_nEntity", g_Spray[client].iEntity);
+			TE_WriteNum("m_nHitbox", g_Spray[client].iHitbox);
+			TE_WriteNum("m_nIndex", g_Spray[client].iPrecache);
 			TE_SendToAll();
 		}
 		case 1: {
 			TE_Start("BSP Decal");
-			TE_WriteVector("m_vecOrigin", fClientEyeViewPoint);
-			TE_WriteNum("m_nEntity", iEntity);
-			TE_WriteNum("m_nIndex", precacheId);
+			TE_WriteVector("m_vecOrigin", g_Spray[client].fPosition);
+			TE_WriteNum("m_nEntity", g_Spray[client].iEntity);
+			TE_WriteNum("m_nIndex", g_Spray[client].iPrecache);
 			TE_SendToAll();
 		}
 	}
@@ -383,3 +368,62 @@ public bool IsAdmin(int client)
 
 	return CheckCommandAccess(client, "", ReadFlagString(adminFlagsBuffer), false);
 }
+
+/*
+public void OnGameFrame() {
+
+	if (GetGameTickCount() % 20)
+		return;
+
+	for (int client = 1; client <= MAXPLAYERS; client++) {
+		if (g_Spray[client].iPreviewMode != 2)
+			return;
+
+		CalculateSprayPosition(client);
+		MoveSprite(client);
+	}
+}
+
+void CreateSprite(int client)
+{
+	int sprite = CreateEntityByName("env_sprite_oriented");
+	if (IsValidEdict(sprite))
+	{
+		char StrEntityName[64]; Format(StrEntityName, sizeof(StrEntityName), "env_sprite_oriented_%i", sprite);
+		char strMaterialName[128]; Format(strMaterialName, sizeof(strMaterialName), "%s.vmt", g_Spray[client].sMaterialName);
+
+		DispatchKeyValue(sprite, "model", strMaterialName);
+		DispatchKeyValue(client, "targetname", StrEntityName);
+		DispatchKeyValue(sprite, "classname", "env_sprite_oriented");
+		DispatchKeyValue(sprite, "spawnflags", "1");
+		DispatchKeyValueFloat(sprite, "scale", g_Spray[client].fScale);
+		DispatchKeyValue(sprite, "rendermode", "1");
+		DispatchKeyValue(sprite, "rendercolor", "255 255 255");
+		DispatchKeyValue(sprite, "framerate", "5");
+
+		DispatchSpawn(sprite);
+
+		g_Spray[client].iPreviewSprite = sprite;
+	}
+	PrintToChatAll("Made sprite for %N with material %s", client, g_Spray[client].sMaterialName);
+}
+
+void MoveSprite(int client)
+{
+	TeleportEntity(g_Spray[client].iPreviewSprite, g_Spray[client].fPosition, NULL_VECTOR, NULL_VECTOR);
+}
+
+void KillSprite(int client)
+{
+	if (IsValidEdict(g_Spray[client].iPreviewSprite))
+		AcceptEntityInput(g_Spray[client].iPreviewSprite, "Kill");
+
+	g_Spray[client].iPreviewSprite = -1;
+}
+
+public Action Command_Sprite(int client, int args)
+{
+	GetClientEyePosition(client, g_Spray[client].fPosition);
+	CreateSprite(client);
+}
+*/
