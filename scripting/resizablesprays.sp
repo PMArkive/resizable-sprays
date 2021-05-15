@@ -22,7 +22,7 @@
 #define PLUGIN_NAME "Resizable Sprays"
 #define PLUGIN_DESC "Extends default sprays to allow for scaling and spamming"
 #define PLUGIN_AUTHOR "Sappykun"
-#define PLUGIN_VERSION "1.1.0"
+#define PLUGIN_VERSION "1.1.1"
 #define PLUGIN_URL "https://forums.alliedmods.net/showthread.php?t=332418"
 
 #define DEBUG 1
@@ -66,8 +66,9 @@ float g_fClientLastSprayed[MAXPLAYERS + 1];
 ConVar cv_sAdminFlags;
 ConVar cv_fSprayDelay;
 ConVar cv_fMaxSprayScale;
-ConVar cv_iMaxSprayDistance;
+ConVar cv_fMaxSprayDistance;
 ConVar cv_fDecalFrequency;
+ConVar cv_bDebug;
 
 public Plugin myinfo =
 {
@@ -87,9 +88,10 @@ public void OnPluginStart()
 
 	cv_sAdminFlags = CreateConVar("rspr_adminflags", "b", "Admin flags required to bypass restrictions", FCVAR_NONE, false, 0.0, false, 0.0);
 	cv_fSprayDelay = CreateConVar("rspr_delay", "0.5", "Time to give to send out a VMT file. Setting this too low\nwill cause material loading errors on clients.", FCVAR_NONE, true, 0.0, false, 0.0);
-	cv_iMaxSprayDistance = CreateConVar("rspr_maxspraydistance", "128", "Max range for placing decals. 0 is infinite range", FCVAR_NONE, true, 0.0, false);
+	cv_fMaxSprayDistance = CreateConVar("rspr_maxspraydistance", "128.0", "Max range for placing decals. 0 is infinite range", FCVAR_NONE, true, 0.0, false);
 	cv_fMaxSprayScale = CreateConVar("rspr_maxsprayscale", "0.20", "Maximum scale for sprays. Actual size depends on dimensions of your spray.\nFor reference, a 512x512 spray at 0.25 scale will be 128x128\nhammer units tall, double that of a normal 64x64 spray.", FCVAR_NONE, true, 0.0, false, 0.0);
 	cv_fDecalFrequency = CreateConVar("rspr_decalfrequency", "0.5", "Spray frequency for non-admins. 0 is no delay.", FCVAR_NONE, true, 0.0, false);
+	cv_bDebug = CreateConVar("rspr_debug", "0", "Debug mode", FCVAR_NONE, true, 0.0, true, 1.0);
 
 	AutoExecConfig(true, "resizablesprays");
 	LoadTranslations("common.phrases");
@@ -102,6 +104,13 @@ public void OnClientConnected(int client)
 {
 	g_fClientLastSprayed[client] = 0.0;
 }
+
+public void OnMapStart()
+{
+	for (int c = 0; c < sizeof(g_fClientLastSprayed); c++)
+		g_fClientLastSprayed[c] = 0.0;
+}
+
 
 /*
 	Handles the !spray and !bspray commands
@@ -118,13 +127,18 @@ public Action Command_Spray(int client, int args)
 	spray.iSprayer = client;
 	spray.iClient = client;
 
-	if (!IsValidClient(client))
+	if (!IsValidClient(client)) {
+		if (cv_bDebug.BoolValue) LogMessage("Client %i is invalid", client);
 		return Plugin_Handled;
+	}
 
-	if (GetGameTime() - g_fClientLastSprayed[client] < cv_fDecalFrequency.FloatValue && !IsAdmin(client))
+	if (GetGameTime() - g_fClientLastSprayed[client] < cv_fDecalFrequency.FloatValue && !IsAdmin(client)) {
+		if (cv_bDebug.BoolValue) LogMessage("Client %i is spraying too fast (%0.4f < %0.4f)", client, GetGameTime() - g_fClientLastSprayed[client], cv_fDecalFrequency.FloatValue);
 		return Plugin_Handled;
+	}
 	g_fClientLastSprayed[client] = GetGameTime();
 
+	if (cv_bDebug.BoolValue) LogMessage("Checking args for player %N", client);
 
 	if (args > 0) {
 		if (!IsAdmin(client) && (args > 1 || !StringToFloatEx(arg1, spray.fScale))) {
@@ -151,9 +165,15 @@ public Action Command_Spray(int client, int args)
 		spray.fScale = cv_fMaxSprayScale.FloatValue;
 	}
 
-	if (StrEqual(arg0, "sm_bspray") && IsAdmin(client))
-		spray.iDecalType = 1;
+	if (cv_bDebug.BoolValue) LogMessage("Player %N is placing %N's spray at %0.4f scale", client, spray.iClient, spray.fScale);
 
+	if (StrEqual(arg0, "sm_bspray") && IsAdmin(client)) {
+		if (cv_bDebug.BoolValue) LogMessage("Changing %N's spray to BSP type", client);
+		spray.iDecalType = 1;
+	}
+
+
+	if (cv_bDebug.BoolValue) LogMessage("Getting position of spray %N", client);
 	CalculateSprayPosition(spray);
 
 	if (spray.iEntity > -1) {
@@ -172,6 +192,8 @@ public Action Command_Spray(int client, int args)
 		pack.WriteCell(spray.iHitbox);
 		pack.WriteString(spray.sMaterialName);
 		pack.WriteCell(spray.iDecalType);
+	} else {
+		if (cv_bDebug.BoolValue) LogMessage("CalculateSprayPosition reported bad ent for spray %N", client);
 	}
 
 	return Plugin_Handled;
@@ -266,6 +288,7 @@ public void CalculateSprayPosition(Spray spray)
 	float fVector[3];
 
 	if (!IsValidClient(spray.iSprayer) || !IsPlayerAlive(spray.iSprayer)) {
+		if (cv_bDebug.BoolValue) LogMessage("CalculateSprayPosition: Client %i is invalid or dead", spray.iSprayer);
 		spray.iEntity = -1;
 		return;
 	}
@@ -282,10 +305,12 @@ public void CalculateSprayPosition(Spray spray)
 
 	CloseHandle(hTrace);
 
-	MakeVectorFromPoints(fAngles, fOrigin, fVector);
+	MakeVectorFromPoints(fOrigin, spray.fPosition, fVector);
 
-	if (GetVectorLength(fVector) > cv_iMaxSprayDistance.IntValue > 0 && !IsAdmin(spray.iSprayer))
+	if (GetVectorLength(fVector) > cv_fMaxSprayDistance.FloatValue > 0 && !IsAdmin(spray.iSprayer)) {
+		if (cv_bDebug.BoolValue) LogMessage("CalculateSprayPosition: %N sprayed too far (%0.4f > %0.4f)", spray.iSprayer, GetVectorLength(fVector), cv_fMaxSprayDistance.FloatValue);
 		spray.iEntity = -1;
+	}
 }
 
 /*
