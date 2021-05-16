@@ -27,11 +27,11 @@
 #define PLUGIN_URL "https://forums.alliedmods.net/showthread.php?t=332418"
 
 // TODO: move this to a separate file
-char g_vmtTemplate[512] = "LightmappedGeneric\n\
+char g_vmtTemplate[512] = "UnlitGeneric\n\
 {\n\
 \t$basetexture \"temp/%s\"\n\
 \t$decalscale %.4f\n\
-\t$spriteorientation 4\n\
+\t$spriteorientation 3\n\
 \t$spriteorigin \"[ 0.50 0.50 ]\"\n\
 \t$vertexcolor 1\n\
 \t$vertexalpha 1\n\
@@ -61,6 +61,7 @@ enum struct Spray {
 	float fScale;
 	float fLastSprayed;
 	float fPosition[3];
+	float fNormal[3];
 	char sMaterialName[64];
 }
 
@@ -73,6 +74,7 @@ ConVar cv_fSprayDelay;
 ConVar cv_fMaxSprayScale;
 ConVar cv_fMaxSprayDistance;
 ConVar cv_fDecalFrequency;
+ConVar cv_iPreviewUpdateFrequency;
 
 char g_strLogFile[PLATFORM_MAX_PATH];
 
@@ -90,7 +92,6 @@ public void OnPluginStart()
 	RegConsoleCmd("sm_spray", Command_Spray, "Places a repeatable, scalable version of your spray as a decal.");
 	RegConsoleCmd("sm_bspray", Command_Spray, "Places a repeatable, scalable version of your spray as a BSP decal.");
 	RegConsoleCmd("sm_spraymenu", Command_SprayMenu, "Toggles spray preview mode.");
-	//RegConsoleCmd("sm_sprite", Command_Sprite, "Place sprite");
 
 	CreateConVar("rspr_version", PLUGIN_VERSION, "Resizable Sprays version. Don't touch this.", FCVAR_NOTIFY|FCVAR_DONTRECORD|FCVAR_SPONLY);
 
@@ -99,6 +100,7 @@ public void OnPluginStart()
 	cv_fMaxSprayDistance = CreateConVar("rspr_maxspraydistance", "128.0", "Max range for placing decals. 0 is infinite range", FCVAR_NONE, true, 0.0, false);
 	cv_fMaxSprayScale = CreateConVar("rspr_maxsprayscale", "0.20", "Maximum scale for sprays. Actual size depends on dimensions of your spray.\nFor reference, a 512x512 spray at 0.25 scale will be 128x128\nhammer units tall, double that of a normal 64x64 spray.", FCVAR_NONE, true, 0.0, false, 0.0);
 	cv_fDecalFrequency = CreateConVar("rspr_decalfrequency", "0.5", "Spray frequency for non-admins. 0 is no delay.", FCVAR_NONE, true, 0.0, false);
+	cv_iPreviewUpdateFrequency = CreateConVar("rspr_previewupdatefrequency", "5", "Update the spray preview every X game ticks. Raising this may decrease server load but makes the preview more choppy.", FCVAR_NONE, true, 0.0, false);
 
 	AutoExecConfig(true, "resizablesprays");
 	LoadTranslations("common.phrases");
@@ -220,14 +222,15 @@ void ClampSpraySize(int client, float add)
 
 public Action Command_SprayMenu(int client, int args)
 {
-	if (g_Spray[client].iPreviewMode > 0) {
-		if (g_Spray[client].iPreviewMode == 2) {
-			g_Spray[client].iPreviewMode = 0;
-			ReplyToCommand(client, "Spray preview mode disabled.");
-		}
+	if (g_Spray[client].iPreviewMode > 0) 
 		return Plugin_Handled;
-	}
+	
 	g_Spray[client].iPreviewMode = 1;
+
+	if (g_Spray[client].fScale <= 0.0)
+			g_Spray[client].fScale = cv_fMaxSprayScale.FloatValue;
+	if (g_Spray[client].iClient <= 0)
+			g_Spray[client].iClient = client;
 
 	WriteVMT(client);
 	CreateTimer(cv_fSprayDelay.FloatValue, Timer_PrecacheDecalAndDisplayPreviewMenu, client);
@@ -242,7 +245,9 @@ public int SprayMenuHandler(Menu menu, MenuAction action, int client, int index)
         switch (index) {
 
 	      	case 0: {
-	      		PrintToChat(client, "Placing spray");
+				WriteVMT(client);
+				CreateTimer(cv_fSprayDelay.FloatValue, Timer_PrecacheAndSprayDecal, client);
+				g_Spray[client].iPreviewMode = 0;
 	     	}
 	     	case 1: {
 	      		PrintToChat(client, "Changing spray");
@@ -269,8 +274,10 @@ public int SprayMenuHandler(Menu menu, MenuAction action, int client, int index)
 	     	}
     	}
     }
-    else if (action == MenuAction_Cancel) {
-        KillSprite(client);
+    
+    else if (action == MenuAction_Cancel)
+    {
+        g_Spray[client].iPreviewMode = 0;
     }
 }
 
@@ -361,8 +368,10 @@ public void CalculateSprayPosition(int client)
 	GetClientEyePosition(client, fOrigin);
 
 	Handle hTrace = TR_TraceRayFilterEx(fOrigin, fAngles, MASK_SHOT, RayType_Infinite, TraceEntityFilterPlayer);
-	if (TR_DidHit(hTrace))
+	if (TR_DidHit(hTrace)) {
 		TR_GetEndPosition(g_Spray[client].fPosition, hTrace);
+		TR_GetPlaneNormal(hTrace, g_Spray[client].fNormal);
+	}
 
 	g_Spray[client].iEntity = TR_GetEntityIndex(hTrace);
 	g_Spray[client].iHitbox = TR_GetHitBoxIndex(hTrace);
@@ -450,12 +459,15 @@ public bool IsAdmin(int client)
 
 public void OnGameFrame() {
 
-	if (GetGameTickCount() % 20)
+	if (GetGameTickCount() % cv_iPreviewUpdateFrequency.IntValue)
 		return;
 
 	for (int client = 1; client <= MAXPLAYERS; client++) {
-		if (g_Spray[client].iPreviewMode != 2)
+		if (g_Spray[client].iPreviewMode != 2) {
+			if (g_Spray[client].iPreviewSprite > -1)
+				KillSprite(client);
 			return;
+		}
 
 		CalculateSprayPosition(client);
 		MoveSprite(client);
@@ -482,12 +494,18 @@ void CreateSprite(int client)
 
 		g_Spray[client].iPreviewSprite = sprite;
 	}
-	PrintToChatAll("Made sprite for %N with material %s", client, g_Spray[client].sMaterialName);
 }
 
 void MoveSprite(int client)
 {
-	TeleportEntity(g_Spray[client].iPreviewSprite, g_Spray[client].fPosition, NULL_VECTOR, NULL_VECTOR);
+	float fAngles[3];
+	float yaw = ArcTangent2(-g_Spray[client].fNormal[1], -g_Spray[client].fNormal[0]);
+	
+	fAngles[0] = g_Spray[client].fNormal[2] * 90.0; // pitch
+	fAngles[1] = RadToDeg(yaw); // yaw
+	fAngles[2] = 0.0; // roll, keep 0
+	
+	TeleportEntity(g_Spray[client].iPreviewSprite, g_Spray[client].fPosition, fAngles, NULL_VECTOR);
 	DispatchKeyValueFloat(g_Spray[client].iPreviewSprite, "scale", g_Spray[client].fScale);
 }
 
@@ -498,10 +516,3 @@ void KillSprite(int client)
 
 	g_Spray[client].iPreviewSprite = -1;
 }
-
-public Action Command_Sprite(int client, int args)
-{
-	GetClientEyePosition(client, g_Spray[client].fPosition);
-	CreateSprite(client);
-}
-
