@@ -222,9 +222,9 @@ void ClampSpraySize(int client, float add)
 
 public Action Command_SprayMenu(int client, int args)
 {
-	if (g_Spray[client].iPreviewMode > 0) 
+	if (g_Spray[client].iPreviewMode > 0)
 		return Plugin_Handled;
-	
+
 	g_Spray[client].iPreviewMode = 1;
 
 	if (g_Spray[client].fScale <= 0.0)
@@ -274,7 +274,7 @@ public int SprayMenuHandler(Menu menu, MenuAction action, int client, int index)
 	     	}
     	}
     }
-    
+
     else if (action == MenuAction_Cancel)
     {
         g_Spray[client].iPreviewMode = 0;
@@ -500,11 +500,11 @@ void MoveSprite(int client)
 {
 	float fAngles[3];
 	float yaw = ArcTangent2(-g_Spray[client].fNormal[1], -g_Spray[client].fNormal[0]);
-	
+
 	fAngles[0] = g_Spray[client].fNormal[2] * 90.0; // pitch
 	fAngles[1] = RadToDeg(yaw); // yaw
 	fAngles[2] = 0.0; // roll, keep 0
-	
+
 	TeleportEntity(g_Spray[client].iPreviewSprite, g_Spray[client].fPosition, fAngles, NULL_VECTOR);
 	DispatchKeyValueFloat(g_Spray[client].iPreviewSprite, "scale", g_Spray[client].fScale);
 }
