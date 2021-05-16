@@ -27,7 +27,7 @@
 #define PLUGIN_URL "https://forums.alliedmods.net/showthread.php?t=332418"
 
 // TODO: move this to a separate file
-char g_vmtTemplate[512] = "UnlitGeneric\n\
+char g_vmtTemplate[512] = "%s\n\
 {\n\
 \t$basetexture \"temp/%s\"\n\
 \t$decalscale %.4f\n\
@@ -198,7 +198,7 @@ public Action Command_Spray(int client, int args)
 
 	if (g_Spray[client].iEntity > -1) {
 
-		WriteVMT(client);
+		WriteVMT(client, false);
 
 		// We need to give the players time to download the VMT before we precache it
 		// TODO: Perform a more robust check. Might need to replace filenetmessages
@@ -232,7 +232,7 @@ public Action Command_SprayMenu(int client, int args)
 	if (g_Spray[client].iClient <= 0)
 			g_Spray[client].iClient = client;
 
-	WriteVMT(client);
+	WriteVMT(client, true);
 	CreateTimer(cv_fSprayDelay.FloatValue, Timer_PrecacheDecalAndDisplayPreviewMenu, client);
 
 	return Plugin_Handled;
@@ -245,31 +245,27 @@ public int SprayMenuHandler(Menu menu, MenuAction action, int client, int index)
         switch (index) {
 
 	      	case 0: {
-				WriteVMT(client);
+				WriteVMT(client, false);
 				CreateTimer(cv_fSprayDelay.FloatValue, Timer_PrecacheAndSprayDecal, client);
 				g_Spray[client].iPreviewMode = 0;
 	     	}
 	     	case 1: {
-	      		PrintToChat(client, "Changing spray");
+				//PrintToChat(client, "Changing spray");
 	     	}
 	      	case 2: {
 	      		ClampSpraySize(client, 0.1);
-	      		PrintToChat(client, "Scale: %0.2f", g_Spray[client].fScale);
 	      		g_MenuPreview.Display(client, MENU_TIME_FOREVER);
 	     	}
 	      	case 3: {
 	      		ClampSpraySize(client, -0.1);
-	      		PrintToChat(client, "Scale: %0.2f", g_Spray[client].fScale);
 	      		g_MenuPreview.Display(client, MENU_TIME_FOREVER);
 	     	}
 	      	case 4: {
 	      		ClampSpraySize(client, 0.01);
-	      		PrintToChat(client, "Scale: %0.2f", g_Spray[client].fScale);
 	      		g_MenuPreview.Display(client, MENU_TIME_FOREVER);
 	     	}
 	     	case 5: {
 	      		ClampSpraySize(client, -0.01);
-	      		PrintToChat(client, "Scale: %0.2f", g_Spray[client].fScale);
 	      		g_MenuPreview.Display(client, MENU_TIME_FOREVER);
 	     	}
     	}
@@ -287,18 +283,26 @@ public int SprayMenuHandler(Menu menu, MenuAction action, int client, int index)
 	@param scale of decal for generated material
 	@param buffer for material name
 */
-public void WriteVMT(int client)
+public void WriteVMT(int client, bool preview)
 {
+	char previewSuffix[16] = "";
+	char materialShader[32] = "LightmappedGeneric";
+
+	if (preview) {
+		previewSuffix = "_preview";
+		materialShader = "UnlitGeneric";
+	}
+
 	char playerdecalfile[12]; GetPlayerDecalFile(g_Spray[client].iClient, playerdecalfile, sizeof(playerdecalfile));
 
-	char data[512]; Format(data, 512, g_vmtTemplate, playerdecalfile, g_Spray[client].fScale);
+	char data[512]; Format(data, 512, g_vmtTemplate, materialShader, playerdecalfile, g_Spray[client].fScale);
 
 	// Get rid of the period in float representation. Source engine doesn't like
 	// loading files with more than one . in the filename.
 	char scaleString[16]; Format(scaleString, 16, "%.4f", g_Spray[client].fScale); ReplaceString(scaleString, 16, ".", "-", false);
 
 	Format(g_Spray[client].sMaterialName, 64, "resizablesprays/%s_%s", playerdecalfile, scaleString);
-	char filename[128]; Format(filename, 128, "materials/%s.vmt", g_Spray[client].sMaterialName);
+	char filename[128]; Format(filename, 128, "materials/%s%s.vmt", g_Spray[client].sMaterialName, previewSuffix);
 
 	if (!FileExists(filename, false)) {
 		if (!DirExists("materials/resizablesprays", false))
@@ -338,7 +342,8 @@ public Action Timer_PrecacheAndSprayDecal(Handle timer, int client)
 
 public Action Timer_PrecacheDecalAndDisplayPreviewMenu(Handle timer, int client)
 {
-	g_Spray[client].iPrecache = PrecacheDecal(g_Spray[client].sMaterialName, false);
+	char previewMaterialName[PLATFORM_MAX_PATH]; Format(previewMaterialName, PLATFORM_MAX_PATH, "%s_preview", g_Spray[client].sMaterialName);
+	PrecacheDecal(previewMaterialName, false);
 	g_Spray[client].iPreviewMode = 2;
 	CreateSprite(client);
 	g_MenuPreview.Display(client, MENU_TIME_FOREVER);
@@ -458,11 +463,14 @@ public bool IsAdmin(int client)
 
 
 public void OnGameFrame() {
-
 	if (GetGameTickCount() % cv_iPreviewUpdateFrequency.IntValue)
 		return;
 
 	for (int client = 1; client <= MAXPLAYERS; client++) {
+
+		if (g_Spray[client].iPreviewSprite == 0 || !IsValidEdict(g_Spray[client].iPreviewSprite))
+			return;
+
 		if (g_Spray[client].iPreviewMode != 2) {
 			if (g_Spray[client].iPreviewSprite > -1)
 				KillSprite(client);
@@ -479,7 +487,7 @@ void CreateSprite(int client)
 	int sprite = CreateEntityByName("env_sprite_oriented");
 	if (IsValidEdict(sprite)) {
 		char StrEntityName[64]; Format(StrEntityName, sizeof(StrEntityName), "env_sprite_oriented_%i", sprite);
-		char strMaterialName[128]; Format(strMaterialName, sizeof(strMaterialName), "%s.vmt", g_Spray[client].sMaterialName);
+		char strMaterialName[128]; Format(strMaterialName, sizeof(strMaterialName), "%s_preview.vmt", g_Spray[client].sMaterialName);
 
 		DispatchKeyValue(sprite, "model", strMaterialName);
 		DispatchKeyValue(client, "targetname", StrEntityName);
