@@ -104,7 +104,7 @@ public void OnPluginStart()
 
 	RegConsoleCmd("sm_spray", Command_Spray, "Places a repeatable, scalable version of your spray as a decal.");
 	RegConsoleCmd("sm_bspray", Command_Spray, "Places a repeatable, scalable version of your spray as a BSP decal.");
-	RegConsoleCmd("sm_spraymenu", Command_SprayMenu, "Toggles spray preview mode.");
+	RegAdminCmd("sm_spraymenu", Command_SprayMenu, ADMFLAG_ROOT, "Toggles spray preview mode.");
 
 	CreateConVar("rspr_version", PLUGIN_VERSION, "Resizable Sprays version. Don't touch this.", FCVAR_NOTIFY|FCVAR_DONTRECORD|FCVAR_SPONLY);
 
@@ -152,6 +152,44 @@ public Action Timer_CheckIfSprayIsReady(Handle timer, int client)
 				return Plugin_Continue;
 			}
 	}
+
+	char playerdecalfile[12]; GetPlayerDecalFile(client, playerdecalfile, sizeof(playerdecalfile));
+
+	char vtfFilepath[PLATFORM_MAX_PATH]; Format(vtfFilepath, sizeof(vtfFilepath), "download/user_custom/%c%c/%s.dat", playerdecalfile[0], playerdecalfile[1], playerdecalfile);
+	char vtfCopypath[PLATFORM_MAX_PATH]; Format(vtfCopypath, sizeof(vtfCopypath), "materials/resizablespraysv2/%s.vtf", playerdecalfile);
+
+	if (!DirExists("materials/resizablespraysv2", false))
+		CreateDirectory("materials/resizablespraysv2", 511, false); // 511 decimal = 755 octal
+
+	if (!g_mapProcessedFiles.GetValue(vtfCopypath, g_bBuffer)) {
+		if (!FileExists(vtfCopypath, false)) {
+			PrintToChat(client, "Processing your spray...");
+			// Copy VTF filepath to materials/temp/________.vtf
+			Handle vtfFile = OpenFile(vtfFilepath, "r", false);
+
+			if (vtfFile == INVALID_HANDLE) {
+				LogToFile(g_strLogFile, "WriteVMT: File %s returned an invalid handle.", vtfFilepath);
+				return Plugin_Continue;
+			}
+
+			Handle vtfCopy = OpenFile(vtfCopypath, "wb", false);
+
+			int buffer[4];
+			int bytesRead;
+			while (!IsEndOfFile(vtfFile)) {
+				bytesRead = ReadFile(vtfFile, buffer, sizeof(buffer), 1);
+				WriteFile(vtfCopy, buffer, bytesRead, 1);
+			}
+
+			CloseHandle(vtfFile);
+			CloseHandle(vtfCopy);
+		}
+
+		// Don't need to add this to downloads table if already in table.
+		LogToFile(g_strLogFile, "Adding late download %s", vtfCopypath);
+		AddLateDownload(vtfCopypath);
+	}
+
 	PrintToChat(client, "Your spray is ready!");
 	return Plugin_Stop;
 }
@@ -274,13 +312,9 @@ public Action Command_Spray(int client, int args)
 	CalculateSprayPosition(client);
 
 	if (g_Spray[client].iEntity > -1) {
-		LogToFile(g_strLogFile, "Command_Spray: Spraying for %N", client);
-		if (WriteVMT(client, false)) {
+		if (WriteVMT(client, false))
 			CreateTimer(0.0, Timer_PrecacheAndSprayDecal, client, TIMER_REPEAT);
-		} else
-			LogToFile(g_strLogFile, "Command_Spray: WriteVMT failed for %N", client);
-	} else
-		LogToFile(g_strLogFile, "Command_Spray: Bad ent for client %N", client);
+	}
 
 	return Plugin_Handled;
 }
@@ -398,37 +432,6 @@ public bool WriteVMT(int client, bool preview)
 	char vtfFilepath[PLATFORM_MAX_PATH]; Format(vtfFilepath, sizeof(vtfFilepath), "download/user_custom/%c%c/%s.dat", playerdecalfile[0], playerdecalfile[1], playerdecalfile);
 	char vtfCopypath[PLATFORM_MAX_PATH]; Format(vtfCopypath, sizeof(vtfCopypath), "materials/resizablespraysv2/%s.vtf", playerdecalfile);
 
-	if (!DirExists("materials/resizablespraysv2", false))
-		CreateDirectory("materials/resizablespraysv2", 511, false); // 511 decimal = 755 octal
-
-	if (!g_mapProcessedFiles.GetValue(vtfCopypath, g_bBuffer)) {
-		if (!FileExists(vtfCopypath, false)) {
-			PrintToChat(client, "Processing your spray...");
-			// Copy VTF filepath to materials/temp/________.vtf
-			Handle vtfFile = OpenFile(vtfFilepath, "r", false);
-
-			if (vtfFile == INVALID_HANDLE) {
-				LogToFile(g_strLogFile, "WriteVMT: File %s returned an invalid handle.", vtfFilepath);
-				return false;
-			}
-
-			Handle vtfCopy = OpenFile(vtfCopypath, "wb", false);
-
-			int buffer[4];
-			int bytesRead;
-			while (!IsEndOfFile(vtfFile)) {
-				bytesRead = ReadFile(vtfFile, buffer, sizeof(buffer), 1);
-				WriteFile(vtfCopy, buffer, bytesRead, 1);
-			}
-
-			CloseHandle(vtfFile);
-			CloseHandle(vtfCopy);
-		}
-
-		// Don't need to add this to downloads table if already in table.
-		AddLateDownload(vtfCopypath);
-	}
-
 	char data[512]; Format(data, 512, g_vmtTemplate, materialShader, playerdecalfile, g_Spray[client].fScaleReal);
 
 	// Get rid of the period in float representation. Source engine doesn't like
@@ -441,16 +444,17 @@ public bool WriteVMT(int client, bool preview)
 	if (g_mapProcessedFiles.GetValue(filename, g_bBuffer))
 		return true;
 
-	if (!FileExists(filename, false)) {
-		if (!DirExists("materials/resizablespraysv2", false))
-			CreateDirectory("materials/resizablespraysv2", 511, false); // 511 decimal = 755 octal
+	if (!DirExists("materials/resizablespraysv2", false))
+		CreateDirectory("materials/resizablespraysv2", 511, false); // 511 decimal = 755 octal
 
+	if (!FileExists(filename, false)) {
 		File vmt = OpenFile(filename, "w+", false);
 		if (vmt != null)
 			WriteFileString(vmt, data, false);
 		CloseHandle(vmt);
 	}
 
+	LogToFile(g_strLogFile, "Adding late download %s", filename);
 	AddLateDownload(filename);
 	return true;
 }
