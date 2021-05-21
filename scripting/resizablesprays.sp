@@ -122,10 +122,6 @@ public void OnPluginStart()
 	char timebuffer[32];
 	FormatTime(timebuffer, sizeof(timebuffer), "%F", GetTime());
 	BuildPath(Path_SM, g_strLogFile, sizeof(g_strLogFile), "logs/rspr_%s.log", timebuffer);
-
-	for (int i = 0; i < sizeof(g_Spray); i++) {
-		g_Spray[i].iPreviewSprite = -1;
-	}
 }
 
 public void OnDownloadSuccess(int iClient, char[] filename) {
@@ -140,7 +136,7 @@ public void OnClientPostAdminCheck(int client)
 	Spray spray;
 	g_Spray[client] = spray;
 	g_Spray[client].iPreviewSprite = -1;
-	PrintToChat(client, "Preparing your spray...");
+	PrintToChat(client, "[SM] Preparing your spray...");
 	CreateTimer(1.0, Timer_CheckIfSprayIsReady, client, TIMER_REPEAT);
 }
 
@@ -163,7 +159,7 @@ public Action Timer_CheckIfSprayIsReady(Handle timer, int client)
 
 	if (!g_mapProcessedFiles.GetValue(vtfCopypath, g_bBuffer)) {
 		if (!FileExists(vtfCopypath, false)) {
-			PrintToChat(client, "Processing your spray...");
+			PrintToChat(client, "[SM] Processing your spray...");
 			// Copy VTF filepath to materials/temp/________.vtf
 			Handle vtfFile = OpenFile(vtfFilepath, "r", false);
 
@@ -190,8 +186,12 @@ public Action Timer_CheckIfSprayIsReady(Handle timer, int client)
 		AddLateDownload(vtfCopypath);
 	}
 
-	PrintToChat(client, "Your spray is ready!");
-	return Plugin_Stop;
+	if (g_mapProcessedFiles.GetValue(vtfCopypath, g_bBuffer)) {
+		PrintToChat(client, "[SM] Your spray is ready!");
+		return Plugin_Stop;
+	} else {
+		return Plugin_Continue;
+	}
 }
 
 public void OnMapStart() {
