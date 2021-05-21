@@ -342,7 +342,7 @@ public int SprayMenuHandler(Menu menu, MenuAction action, int client, int index)
 		switch (index) {
 
 			case 0: {
-				if (WriteVMT(client, false));
+				if (WriteVMT(client, false))
 					CreateTimer(0.0, Timer_PrecacheAndSprayDecal, client);
 				g_Spray[client].iPreviewMode = 0;
 	     	}
