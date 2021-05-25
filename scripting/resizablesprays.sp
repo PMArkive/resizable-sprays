@@ -29,7 +29,7 @@
 #define SPRAY_UNIT_DIMENSION_FLOAT 64.0
 
 // TODO: move this to a separate file
-char g_vmtTemplate[512] = "%s\n\
+char g_vmtTemplate[512] = "LightmappedGeneric\n\
 {\n\
 \t$basetexture \"resizablespraysv2/%s\"\n\
 \t$decalscale %.4f\n\
@@ -54,12 +54,10 @@ char g_vmtTemplate[512] = "%s\n\
 
 enum struct Spray {
 	int iPrecache;
-	int iPreviewSprite;
 	int iClient;
 	int iEntity;
 	int iHitbox;
 	int iDecalType;
-	int iPreviewMode;
 	int iDisplaceFlags;
 	int iSprayHeight;
 	float fScale; // The scale factor the client wants
@@ -77,14 +75,10 @@ bool g_bBuffer;
 
 float g_fRealSprayLastPosition[MAXPLAYERS + 1][3];
 
-Menu g_MenuPreview = null;
-
 ConVar cv_sAdminFlags;
 ConVar cv_fMaxSprayScale;
 ConVar cv_fMaxSprayDistance;
 ConVar cv_fDecalFrequency;
-ConVar cv_iPreviewUpdateFrequency;
-ConVar cv_iPreviewModeEnabled;
 
 char g_strLogFile[PLATFORM_MAX_PATH];
 
@@ -103,7 +97,7 @@ public void OnPluginStart()
 
 	RegConsoleCmd("sm_spray", Command_Spray, "Places a repeatable, scalable version of your spray as a decal.");
 	RegConsoleCmd("sm_bspray", Command_Spray, "Places a repeatable, scalable version of your spray as a BSP decal.");
-	RegConsoleCmd("sm_spraymenu", Command_SprayMenu, "Toggles spray preview mode.");
+	RegAdminCmd("sm_sprayinfo", Command_SprayInfo, ADMFLAG_ROOT, "Dumps spray information");
 
 	CreateConVar("rspr_version", PLUGIN_VERSION, "Resizable Sprays version. Don't touch this.", FCVAR_NOTIFY|FCVAR_DONTRECORD|FCVAR_SPONLY);
 
@@ -111,8 +105,6 @@ public void OnPluginStart()
 	cv_fMaxSprayDistance = CreateConVar("rspr_maxspraydistance", "128.0", "Max range for placing decals. 0 is infinite range", FCVAR_NOTIFY, true, 0.0, false);
 	cv_fMaxSprayScale = CreateConVar("rspr_maxsprayscale", "2.0", "Maximum scale for sprays.", FCVAR_NOTIFY, true, 0.0, false, 0.0);
 	cv_fDecalFrequency = CreateConVar("rspr_decalfrequency", "0.5", "Spray frequency for non-admins. 0 is no delay.", FCVAR_NOTIFY, true, 0.0, false);
-	cv_iPreviewUpdateFrequency = CreateConVar("rspr_previewupdatefrequency", "5", "Update the spray preview every X game ticks. Raising this may decrease server load but makes the preview more choppy.", FCVAR_NONE, true, 0.0, false);
-	cv_iPreviewModeEnabled = CreateConVar("rspr_previewmodeenable", "1", "Enables/disables preview mode. 0 is off for non-admins, 1 is on for everyone, -1 is off for everybody.", FCVAR_NOTIFY, true, -1.0, true, 1.0);
 
 	AddTempEntHook("Player Decal", PlayerSprayReal);
 
@@ -129,18 +121,25 @@ public void OnPluginStart()
 
 public void OnDownloadSuccess(int iClient, char[] filename) {
     if (iClient > 0)
-        LogToFile(g_strLogFile, "%N downloaded spray file '%s'", iClient, filename);
+        return;
     LogToFile(g_strLogFile, "All players successfully downloaded spray file '%s'", filename);
     g_mapProcessedFiles.SetValue(filename, true);
+}
+
+public void OnDownloadFailure(int iClient, char[] filename) {
+    if (iClient > 0)
+        LogToFile(g_strLogFile, "Client %d did not download spray file '%s'", iClient, filename);
+    LogToFile(g_strLogFile, "Error adding '%s' to download queue", filename);
 }
 
 public void OnClientPostAdminCheck(int client)
 {
 	Spray spray;
 	g_Spray[client] = spray;
-	g_Spray[client].iPreviewMode = 0;
-	g_Spray[client].iPreviewSprite = -1;
+	g_Spray[client].iClient = client;
 	g_Spray[client].iSprayHeight = 0;
+	g_Spray[client].fLastSprayed = 0.0;
+
 	PrintToChat(client, "[SM] Preparing your spray...");
 	CreateTimer(1.0, Timer_CheckIfSprayIsReady, client, TIMER_REPEAT);
 }
@@ -208,34 +207,6 @@ public void ForceDownloadPlayerSprayFile(int client) {
 		LogToFile(g_strLogFile, "Adding late download %s", vtfCopypath);
 		AddLateDownload(vtfCopypath);
 	}
-}
-
-public void OnMapStart() {
-	g_MenuPreview = BuildSprayPreviewMenu();
-}
-
-Menu BuildSprayPreviewMenu()
-{
-	Menu menu = new Menu(SprayMenuHandler);
-
-	menu.SetTitle("Resizable Sprays preview menu");
-	menu.AddItem("place", "Place spray");
-	//menu.AddItem("change", "Change spray");
-	menu.AddItem("increasebig", "Increase scale +1.0");
-	menu.AddItem("decreasebig", "Decrease scale -1.0");
-	menu.AddItem("increasesmall", "Increase scale +0.1");
-	menu.AddItem("decreasesmall", "Decrease scale -0.1");
-	menu.ExitButton = true;
-
-	return menu;
-}
-
-/*
-	Resets decalfrequency timer when client joins
-*/
-public void OnClientConnected(int client)
-{
-	g_Spray[client].fLastSprayed = 0.0;
 }
 
 // Credit goes to Bakugo for the original code
@@ -326,24 +297,30 @@ public Action Command_Spray(int client, int args)
 		}
 	}
 
-	g_Spray[client].fScaleReal = ClampSpraySize(g_Spray[client].iClient, 0.0);
-
 	TE_Start("Player Decal");
 	TE_WriteVector("m_vecOrigin", g_fRealSprayLastPosition[g_Spray[client].iClient]);
 	TE_WriteNum("m_nEntity", 0);
 	TE_WriteNum("m_nPlayer", g_Spray[client].iClient);
 	TE_SendToAll();
 
-	LogToFile(g_strLogFile, "Command_Spray: %N is spraying %N's spray at %0.4f scale", client, g_Spray[client].iClient, g_Spray[client].fScale);
+	g_Spray[client].fScaleReal = ClampSpraySize(g_Spray[client].iClient, 0.0);
 
 	CalculateSprayPosition(client);
 
 	if (g_Spray[client].iEntity > -1) {
-		if (WriteVMT(client, false))
+		LogToFile(g_strLogFile, "Command_Spray: %N is spraying %N's spray at %0.4f scale", client, g_Spray[client].iClient, g_Spray[client].fScale);
+		if (WriteVMT(client))
 			CreateTimer(0.0, Timer_PrecacheAndSprayDecal, client, TIMER_REPEAT);
+	} else {
+		ReplyToCommand(client, "[SM] You are too far away from a valid surface to place a spray!");
 	}
 
 	return Plugin_Handled;
+}
+
+public Action Command_SprayInfo(int client, int args) {
+	ReplyToCommand(client, "Material name: %s", g_Spray[client].sMaterialName);
+	ReplyToCommand(client, "Spray height: %d, scale: %0.2f (%0.4f)", g_Spray[client].iSprayHeight, g_Spray[client].fScale, g_Spray[client].fScaleReal);
 }
 
 float ClampSpraySize(int client, float add)
@@ -353,7 +330,7 @@ float ClampSpraySize(int client, float add)
 	if (!IsAdmin(client) && g_Spray[client].fScale > cv_fMaxSprayScale.FloatValue)
 		g_Spray[client].fScale = cv_fMaxSprayScale.FloatValue;
 
-	if (FloatEqual(g_Spray[client].fScale, 0.0, 0.001)) {
+	if (FloatEqual(g_Spray[client].fScale, 0.0, 0.0001)) {
 		g_Spray[client].fScale = 1.0;
 	}
 
@@ -362,126 +339,30 @@ float ClampSpraySize(int client, float add)
 	return realScale;
 }
 
-public Action Command_SprayMenu(int client, int args)
-{
-	if (cv_iPreviewModeEnabled.IntValue == -1) {
-		ReplyToCommand(client, "[SM] Preview mode is disabled for everyone.");
-		return Plugin_Handled;
-	} else if (cv_iPreviewModeEnabled.IntValue == 0 && !IsAdmin(client)) {
-                ReplyToCommand(client, "[SM] Preview mode is disabled for non-admins.");
-                return Plugin_Handled;
-        }
-
-	if (g_Spray[client].iPreviewMode > 0)
-		return Plugin_Handled;
-
-	if (g_Spray[client].iClient <= 0)
-		g_Spray[client].iClient = client;
-
-	char playerdecalfile[12]; GetPlayerDecalFile(g_Spray[client].iClient, playerdecalfile, sizeof(playerdecalfile));
-	char vtfFilePath[PLATFORM_MAX_PATH]; Format(vtfFilePath, sizeof(vtfFilePath), "materials/resizablespraysv2/%s.vtf", playerdecalfile);
-	if (!g_mapProcessedFiles.GetValue(vtfFilePath, g_bBuffer))
-		ForceDownloadPlayerSprayFile(g_Spray[client].iClient);
-
-	if (g_Spray[client].iSprayHeight == 0) {
-		g_Spray[client].iSprayHeight = GetClientSprayHeight(g_Spray[client].iClient);
-		if (g_Spray[client].iSprayHeight == 0) {
-			ReplyToCommand(client, "[SM] We're still preparing your spray, please try again later.");
-			return Plugin_Handled;
-		}
-	}
-
-	g_Spray[client].iPreviewMode = 1;
-
-	g_Spray[client].fScaleReal = ClampSpraySize(g_Spray[client].iClient, 0.0);
-
-	if (WriteVMT(client, true))
-		CreateTimer(0.0, Timer_PrecacheDecalAndDisplayPreviewMenu, client, TIMER_REPEAT);
-	else
-		PrintToChat(client, "Failed to write VMT");
-
-	return Plugin_Handled;
-}
-
-public int SprayMenuHandler(Menu menu, MenuAction action, int client, int index)
-{
-	if (!IsValidClient(client))
-		return 0;
-
-	if (g_Spray[client].iPreviewMode != 2)
-		return 0;
-
-    /* If an option was selected, tell the client about the item. */
-	if (action == MenuAction_Select) {
-		switch (index) {
-			case 0: {
-				if (WriteVMT(client, false))
-					CreateTimer(0.0, Timer_PrecacheAndSprayDecal, client, TIMER_REPEAT);
-				g_Spray[client].iPreviewMode = 0;
-			}
-			case 1: {
-				g_Spray[client].fScaleReal = ClampSpraySize(client, 1.0);
-				g_MenuPreview.Display(client, MENU_TIME_FOREVER);
-			}
-			case 2: {
-				g_Spray[client].fScaleReal = ClampSpraySize(client, -1.0);
-				g_MenuPreview.Display(client, MENU_TIME_FOREVER);
-			}
-			case 3: {
-				g_Spray[client].fScaleReal = ClampSpraySize(client, 0.1);
-				g_MenuPreview.Display(client, MENU_TIME_FOREVER);
-			}
-			case 4: {
-				g_Spray[client].fScaleReal = ClampSpraySize(client, -0.1);
-				g_MenuPreview.Display(client, MENU_TIME_FOREVER);
-			}
-		}
-	}
-
-	else if (action == MenuAction_Cancel)
-	{
-		g_Spray[client].iPreviewMode = 0;
-	}
-
-	return 0;
-}
-
 /*
 	Writes a VMT file to the server, then sends it to all available clients
 	@param ID of client, will use their spray's unique filename
 	@param scale of decal for generated material
 	@param buffer for material name
 */
-public bool WriteVMT(int client, bool preview)
+public bool WriteVMT(int client)
 {
-	char vtfFilepath[PLATFORM_MAX_PATH];
-	char vtfCopypath[PLATFORM_MAX_PATH];
 	char playerdecalfile[12];
 
 	char data[512];
 	char scaleString[16];
-	char previewSuffix[16] = "";
 	char vmtFilename[128];
-	char materialShader[32] = "LightmappedGeneric";
-
-	if (preview) {
-		previewSuffix = "_preview";
-		materialShader = "UnlitGeneric";
-	}
 
 	GetPlayerDecalFile(g_Spray[client].iClient, playerdecalfile, sizeof(playerdecalfile));
 
-	Format(vtfFilepath, sizeof(vtfFilepath), "download/user_custom/%c%c/%s.dat", playerdecalfile[0], playerdecalfile[1], playerdecalfile);
-	Format(vtfCopypath, sizeof(vtfCopypath), "materials/resizablespraysv2/%s.vtf", playerdecalfile);
-
-	Format(data, 512, g_vmtTemplate, materialShader, playerdecalfile, g_Spray[client].fScaleReal);
+	Format(data, 512, g_vmtTemplate, playerdecalfile, g_Spray[client].fScaleReal);
 
 	// Get rid of the period in float representation. Source engine doesn't like
 	// loading files with more than one . in the filename.
 	Format(scaleString, 16, "%.4f", g_Spray[client].fScaleReal); ReplaceString(scaleString, 16, ".", "-", false);
 
 	Format(g_Spray[client].sMaterialName, 64, "resizablespraysv2/%s_%s", playerdecalfile, scaleString);
-	Format(vmtFilename, 128, "materials/%s%s.vmt", g_Spray[client].sMaterialName, previewSuffix);
+	Format(vmtFilename, 128, "materials/%s.vmt", g_Spray[client].sMaterialName);
 
 	if (g_mapProcessedFiles.GetValue(vmtFilename, g_bBuffer))
 		return true;
@@ -511,38 +392,8 @@ public Action Timer_PrecacheAndSprayDecal(Handle timer, int client)
 	if (g_mapProcessedFiles.GetValue(vtfFilename, g_bBuffer) && g_mapProcessedFiles.GetValue(filename, g_bBuffer)) {
 		g_Spray[client].iPrecache = PrecacheDecal(g_Spray[client].sMaterialName, false);
 		PlaceSpray(client);
-		g_Spray[client].iPreviewMode = 0;
 		return Plugin_Stop;
 	}
-
-	return Plugin_Continue;
-}
-
-public Action Timer_PrecacheDecalAndDisplayPreviewMenu(Handle timer, int client)
-{
-	char playerdecalfile[12]; GetPlayerDecalFile(g_Spray[client].iClient, playerdecalfile, sizeof(playerdecalfile));
-	char vtfFilename[PLATFORM_MAX_PATH]; Format(vtfFilename, sizeof(vtfFilename), "materials/resizablespraysv2/%s.vtf", playerdecalfile);
-
-	char pfilename[128]; Format(pfilename, 128, "materials/%s_preview.vmt", g_Spray[client].sMaterialName);
-
-	PrintToChat(client, "%s %d", vtfFilename, g_mapProcessedFiles.GetValue(vtfFilename, g_bBuffer));
-	PrintToChat(client, "%s %d", pfilename, g_mapProcessedFiles.GetValue(pfilename, g_bBuffer));
-
-	if (g_mapProcessedFiles.GetValue(vtfFilename, g_bBuffer) && g_mapProcessedFiles.GetValue(pfilename, g_bBuffer)) {
-		PrintToChat(client, "Opening menu");
-		char previewMaterialName[PLATFORM_MAX_PATH]; Format(previewMaterialName, PLATFORM_MAX_PATH, "%s_preview", g_Spray[client].sMaterialName);
-		PrintToChat(client, "Precaching decal");
-		PrecacheDecal(previewMaterialName, false);
-		g_Spray[client].iPreviewMode = 2;
-		PrintToChat(client, "Making sprite");
-		CreateSprite(client);
-		PrintToChat(client, "Displaying menu");
-		g_MenuPreview.Display(client, MENU_TIME_FOREVER);
-		PrintToChat(client, "Stopping timer");
-		return Plugin_Stop;
-	}
-	PrintToChat(client, "Menu check failed");
-
 
 	return Plugin_Continue;
 }
@@ -655,123 +506,6 @@ public bool IsAdmin(int client)
 	cv_sAdminFlags.GetString(adminFlagsBuffer, sizeof(adminFlagsBuffer));
 
 	return CheckCommandAccess(client, "", ReadFlagString(adminFlagsBuffer), false);
-}
-
-public void OnGameFrame() {
-	if (GetGameTickCount() % 60 == 0) {
-		int sprite = -1;
-		while ((sprite = FindEntityByClassname(sprite, "env_sprite_oriented")) != -1) {
-			if (IsSpriteOrphaned(sprite))
-				AcceptEntityInput(sprite, "Kill");
-		}
-	}
-
-	if (GetGameTickCount() % cv_iPreviewUpdateFrequency.IntValue)
-		return;
-
-	for (int client = 1; client <= MAXPLAYERS; client++) {
-		if (!IsValidClient(client))
-			break;
-
-		if (g_Spray[client].iPreviewSprite == 0 || !IsValidEdict(g_Spray[client].iPreviewSprite)) {
-			g_Spray[client].iPreviewSprite = 0;
-			break;
-		}
-
-		if (g_Spray[client].iPreviewMode != 2) {
-			if (g_Spray[client].iPreviewSprite > -1)
-				KillSprite(client);
-			break;
-		}
-
-		CalculateSprayPosition(client);
-		MoveSprite(client);
-	}
-
-}
-
-bool IsSpriteOrphaned(int sprite)
-{
-	for (int client = 1; client <= MAXPLAYERS; client++) {
-		if (g_Spray[client].iPreviewSprite == sprite)
-			return false;
-	}
-	return true;
-}
-
-void CreateSprite(int client)
-{
-	int sprite = CreateEntityByName("env_sprite_oriented");
-	if (IsValidEdict(sprite)) {
-		char StrEntityName[64]; Format(StrEntityName, sizeof(StrEntityName), "rspr_sprite_%i", sprite);
-		char strMaterialName[128]; Format(strMaterialName, sizeof(strMaterialName), "%s_preview.vmt", g_Spray[client].sMaterialName);
-
-		DispatchKeyValue(sprite, "model", strMaterialName);
-		DispatchKeyValue(client, "targetname", StrEntityName);
-		DispatchKeyValue(sprite, "classname", "env_sprite_oriented");
-		DispatchKeyValue(sprite, "rendercolor", "255 255 255"); // must go before renderamt or sprite won't rnder in L4D2
-		DispatchKeyValue(sprite, "renderamt", "127");
-		DispatchKeyValue(sprite, "spawnflags", "1");
-		DispatchKeyValue(sprite, "rendermode", "1");
-		DispatchKeyValue(sprite, "framerate", "5");
-
-		DispatchKeyValueFloat(sprite, "scale", g_Spray[client].fScaleReal);
-
-		PrintToChat(client, "Spawning sprite");
-		DispatchSpawn(sprite);
-
-		SetEntPropFloat(sprite, Prop_Send, "m_flScaleTime", 1200.0);
-
-		//SetEntProp(sprite, Prop_Send, "m_bWorldSpaceScale", 1);
-		PrintToChat(client, "Set props");
-
-		g_Spray[client].iPreviewSprite = sprite;
-		LogToFile(g_strLogFile, "Made sprite with ID %i and model %s for %N", sprite, strMaterialName, client);
-	}
-}
-
-// Does not handle displacements very well.
-// We're storing the displacement flags but currently are not doing anything
-// with them. TODO: Find the orientation of the original brush surface
-void MoveSprite(int client)
-{
-	float fAngles[3];
-	// FloatAbs is to prevent tracebacks when finding the square root of -0.0
-	float pitch = RadToDeg(ArcTangent2(g_Spray[client].fNormal[2], SquareRoot(FloatAbs(1.0 - Pow(g_Spray[client].fNormal[2], 2.0)))));
-	float yaw = RadToDeg(ArcTangent2(-g_Spray[client].fNormal[1], -g_Spray[client].fNormal[0]));
-
-	if (pitch < -45.0)
-		yaw = 90.0;
-
-	if (pitch > 45.0) {
-		// Sprays face north, AKA along the Y axis
-		// If the Y component of the normal vector is positive, the surface is
-		// sloping while facing north and the pitch needs to be adjusted to
-		// prevent the sprite from facing the ground and becoming unviewable
-		if (g_Spray[client].fNormal[1] > 0.0)
-			pitch = 180.0 - pitch;
-
-		if (pitch > 45.0)
-			yaw = 90.0;
-	}
-
-	fAngles[0] = pitch;
-	fAngles[1] = yaw;
-	fAngles[2] = 0.0; // roll, keep 0
-
-	TeleportEntity(g_Spray[client].iPreviewSprite, g_Spray[client].fPosition, fAngles, NULL_VECTOR);
-
-	DispatchKeyValueFloat(g_Spray[client].iPreviewSprite, "scale", g_Spray[client].fScaleReal);
-
-	PrintToChat(client, "Scale: %0.4f %0.4f", g_Spray[client].fScale, g_Spray[client].fScaleReal);
-}
-
-void KillSprite(int client)
-{
-	if (g_Spray[client].iPreviewSprite > 0 && IsValidEdict(g_Spray[client].iPreviewSprite))
-		AcceptEntityInput(g_Spray[client].iPreviewSprite, "Kill");
-
-	g_Spray[client].iPreviewSprite = -1;
 }
 
 public bool FloatEqual(float a, float b, float error) {
