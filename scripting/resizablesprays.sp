@@ -22,7 +22,7 @@
 #define PLUGIN_NAME "Resizable Sprays"
 #define PLUGIN_DESC "Extends default sprays to allow for scaling and spamming"
 #define PLUGIN_AUTHOR "Sappykun"
-#define PLUGIN_VERSION "2.0.0-RC1"
+#define PLUGIN_VERSION "2.0.0-RC2"
 #define PLUGIN_URL "https://forums.alliedmods.net/showthread.php?t=332418"
 
 // Normal sprays are 64 Hammer units tall
@@ -131,7 +131,6 @@ public void OnMapStart()
 	g_SprayQueue = new ArrayList(sizeof(Spray));
 }
 
-// Returning 0 is unreliable.
 public void OnDownloadSuccess(int iClient, char[] filename)
 {
 	if (iClient > 0) {
@@ -154,7 +153,7 @@ public void OnDownloadFailure(int iClient, char[] filename)
 	LogToFile(g_strLogFile, "Error adding '%s' to download queue", filename);
 }
 
-public void OnClientPostAdminCheck(int client)
+public bool OnClientConnect(int client, char[] rejectmsg, int maxlen)
 {
 	g_Players[client].bIsReadyToSpray = false;
 	g_Players[client].bSprayHasBeenProcessed = false;
@@ -164,7 +163,10 @@ public void OnClientPostAdminCheck(int client)
 	g_Players[client].fRealSprayLastPosition[0] = -16384.0;
 	g_Players[client].fRealSprayLastPosition[1] = -16384.0;
 	g_Players[client].fRealSprayLastPosition[2] = -16384.0;
+}
 
+public void OnClientPostAdminCheck(int client)
+{
 	PrintToChat(client, "[SM] Preparing your spray...");
 	CreateTimer(1.0, Timer_CheckIfSprayIsReady, client, TIMER_REPEAT);
 }
@@ -299,11 +301,16 @@ public Action Command_Spray(int client, int args)
 			spray.iClient = FindTarget(client, arg2, true, true);
 			if (spray.iClient == -1)
 				return Plugin_Handled;
+
+			if (!IsValidClient(spray.iClient)) {
+				ReplyToCommand(client, "[SM] This client isn't in game yet! Please try again later.");
+				return Plugin_Handled;
+			}
 		}
 	}
 
 	if (!g_Players[spray.iClient].bIsReadyToSpray) {
-			ReplyToCommand(client, "[SM] We're still preparing this spray, please try again later.");
+			ReplyToCommand(client, "[SM] We're still preparing this spray! Please try again later.");
 			return Plugin_Handled;
 		}
 
@@ -388,6 +395,11 @@ public Action Timer_PrecacheAndSprayDecal(Handle timer, int sprayIndex)
 	char playerdecalfile[12];
 	char vtfFilename[PLATFORM_MAX_PATH];
 	char vmtFilename[PLATFORM_MAX_PATH];
+
+	if (!IsValidClient(spray.iClient)) {
+		LogToFile(g_strLogFile, "Client %d is invalid even though we verified it before! Aborting spray operation.", spray.iClient);
+		return Plugin_Stop;
+	}
 
 	GetPlayerDecalFile(spray.iClient, playerdecalfile, sizeof(playerdecalfile));
 	Format(vtfFilename, sizeof(vtfFilename), "materials/resizablespraysv2/%s.vtf", playerdecalfile);
