@@ -22,7 +22,7 @@
 #define PLUGIN_NAME "Resizable Sprays"
 #define PLUGIN_DESC "Extends default sprays to allow for scaling and spamming"
 #define PLUGIN_AUTHOR "Sappykun"
-#define PLUGIN_VERSION "2.0.0-RC2"
+#define PLUGIN_VERSION "2.0.0-RC3"
 #define PLUGIN_URL "https://forums.alliedmods.net/showthread.php?t=332418"
 
 // Normal sprays are 64 Hammer units tall
@@ -69,6 +69,7 @@ enum struct Spray {
 	int iHitbox;
 	int iDecalType;
 	int iSprayHeight;
+	float fSprayTime; // when was this request made
 	float fScaleReal; // The real scale factor based on spray dimensions + clamping
 	float fPosition[3];
 	char sMaterialName[64];
@@ -121,8 +122,9 @@ public void OnPluginStart()
 		CreateDirectory("materials/resizablespraysv2", 511, false); // 511 decimal = 755 octal
 
 	for (int c = 1; c <= MaxClients; c++)
-		if (IsValidClient(c))
+		if (IsValidClient(c)) {
 			OnClientPostAdminCheck(c);
+		}
 }
 
 public void OnMapStart()
@@ -131,8 +133,13 @@ public void OnMapStart()
 	g_SprayQueue = new ArrayList(sizeof(Spray));
 }
 
+
 public void OnDownloadSuccess(int iClient, char[] filename)
 {
+	// Processed Files check is for reloading the plugin.
+	if (iClient == -1)
+		LogToFile(g_strLogFile, "%s was in the downloads table.", filename);
+
 	if (iClient > 0) {
 		LogToFile(g_strLogFile, "%N successfully downloaded spray file '%s'", iClient, filename);
 		return;
@@ -144,7 +151,7 @@ public void OnDownloadSuccess(int iClient, char[] filename)
 
 public void OnDownloadFailure(int iClient, char[] filename)
 {
-	if (iClient > 0 &&!IsValidClient(iClient))
+	if (iClient > 0 && !IsValidClient(iClient))
 		return;
 
 	if (iClient > 0)
@@ -153,7 +160,20 @@ public void OnDownloadFailure(int iClient, char[] filename)
 	LogToFile(g_strLogFile, "Error adding '%s' to download queue", filename);
 }
 
-public bool OnClientConnect(int client, char[] rejectmsg, int maxlen)
+public void OnClientDisconnect(int client)
+{
+	ResetSprayInfo(client);
+}
+
+public void OnClientPostAdminCheck(int client)
+{
+	ResetSprayInfo(client);
+
+	PrintToChat(client, "[SM] Preparing your spray...");
+	CreateTimer(1.0, Timer_CheckIfSprayIsReady, client, TIMER_REPEAT);
+}
+
+public void ResetSprayInfo(int client)
 {
 	g_Players[client].bIsReadyToSpray = false;
 	g_Players[client].bSprayHasBeenProcessed = false;
@@ -163,12 +183,6 @@ public bool OnClientConnect(int client, char[] rejectmsg, int maxlen)
 	g_Players[client].fRealSprayLastPosition[0] = -16384.0;
 	g_Players[client].fRealSprayLastPosition[1] = -16384.0;
 	g_Players[client].fRealSprayLastPosition[2] = -16384.0;
-}
-
-public void OnClientPostAdminCheck(int client)
-{
-	PrintToChat(client, "[SM] Preparing your spray...");
-	CreateTimer(1.0, Timer_CheckIfSprayIsReady, client, TIMER_REPEAT);
 }
 
 public Action Timer_CheckIfSprayIsReady(Handle timer, int client)
@@ -249,7 +263,8 @@ public void ForceDownloadPlayerSprayFile(int client)
 		CloseHandle(vtfFile);
 
 		LogToFile(g_strLogFile, "Adding late download %s", vtfCopypath);
-		AddLateDownload(vtfCopypath);
+		AddFileToDownloadsTable(vtfCopypath);
+		AddLateDownload(vtfCopypath, false);
 		g_Players[client].bSprayHasBeenProcessed = true;
 	}
 }
@@ -380,7 +395,8 @@ public int WriteVMT(Spray spray)
 	}
 
 	LogToFile(g_strLogFile, "Adding late download %s", vmtFilename);
-	AddLateDownload(vmtFilename);
+	AddFileToDownloadsTable(vmtFilename);
+	AddLateDownload(vmtFilename, false);
 	return g_SprayQueue.PushArray(spray);
 }
 
