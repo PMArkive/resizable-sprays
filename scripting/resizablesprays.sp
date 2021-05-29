@@ -22,7 +22,7 @@
 #define PLUGIN_NAME "Resizable Sprays"
 #define PLUGIN_DESC "Extends default sprays to allow for scaling and spamming"
 #define PLUGIN_AUTHOR "Sappykun"
-#define PLUGIN_VERSION "2.0.0-RC3"
+#define PLUGIN_VERSION "2.0.0-RC4"
 #define PLUGIN_URL "https://forums.alliedmods.net/showthread.php?t=332418"
 
 // Normal sprays are 64 Hammer units tall
@@ -85,6 +85,7 @@ ConVar cv_sAdminFlags;
 ConVar cv_fMaxSprayScale;
 ConVar cv_fMaxSprayDistance;
 ConVar cv_fDecalFrequency;
+ConVar cv_fSprayTimeout;
 
 char g_strLogFile[PLATFORM_MAX_PATH];
 
@@ -108,6 +109,7 @@ public void OnPluginStart()
 	cv_fMaxSprayDistance = CreateConVar("rspr_maxspraydistance", "128.0", "Max range for placing decals. 0 is infinite range", FCVAR_NOTIFY, true, 0.0, false);
 	cv_fMaxSprayScale = CreateConVar("rspr_maxsprayscale", "2.0", "Maximum scale for sprays.", FCVAR_NOTIFY, true, 0.0, false, 0.0);
 	cv_fDecalFrequency = CreateConVar("rspr_decalfrequency", "0.5", "Spray frequency for non-admins. 0 is no delay.", FCVAR_NOTIFY, true, 0.0, false);
+	cv_fSprayTimeout = CreateConVar("rspr_spraytimeout", "10.0", "Max time to wait for clients to download spray files. 0 to wait forever.", FCVAR_NOTIFY, true, 0.0, false);
 
 	AddTempEntHook("Player Decal", PlayerSprayReal);
 
@@ -133,20 +135,19 @@ public void OnMapStart()
 	g_SprayQueue = new ArrayList(sizeof(Spray));
 }
 
-
 public void OnDownloadSuccess(int iClient, char[] filename)
 {
-	// Processed Files check is for reloading the plugin.
-	if (iClient == -1)
-		LogToFile(g_strLogFile, "%s was in the downloads table.", filename);
+	int clientsLeft = 0;
 
 	if (iClient > 0) {
-		LogToFile(g_strLogFile, "%N successfully downloaded spray file '%s'", iClient, filename);
+		g_mapProcessedFiles.GetValue(filename, clientsLeft);
+		g_mapProcessedFiles.SetValue(filename, clientsLeft - 1);
+		LogToFile(g_strLogFile, "%N downloaded file '%s' with %d left to go", iClient, filename, clientsLeft - 1);
 		return;
 	}
 
-	LogToFile(g_strLogFile, "All players successfully downloaded spray file '%s'", filename);
-	g_mapProcessedFiles.SetValue(filename, true);
+	LogToFile(g_strLogFile, "All players downloaded file '%s'", filename);
+	g_mapProcessedFiles.SetValue(filename, 0);
 }
 
 public void OnDownloadFailure(int iClient, char[] filename)
@@ -155,7 +156,7 @@ public void OnDownloadFailure(int iClient, char[] filename)
 		return;
 
 	if (iClient > 0)
-		LogToFile(g_strLogFile, "Client %N did not download spray file '%s'", iClient, filename);
+		LogToFile(g_strLogFile, "Client %N did not download file '%s'", iClient, filename);
 
 	LogToFile(g_strLogFile, "Error adding '%s' to download queue", filename);
 }
@@ -187,6 +188,7 @@ public void ResetSprayInfo(int client)
 
 public Action Timer_CheckIfSprayIsReady(Handle timer, int client)
 {
+	int iClientsLeftToDownload = -1;
 	char playerdecalfile[12];
 	char vtfFilePath[PLATFORM_MAX_PATH];
 
@@ -201,7 +203,8 @@ public Action Timer_CheckIfSprayIsReady(Handle timer, int client)
 		return Plugin_Stop;
 	}
 
-	if (g_mapProcessedFiles.GetValue(vtfFilePath, g_bBuffer) && g_Players[client].bSprayHasBeenProcessed) {
+	g_mapProcessedFiles.GetValue(vtfFilePath, iClientsLeftToDownload);
+	if (iClientsLeftToDownload == 0 && g_Players[client].bSprayHasBeenProcessed) {
 		g_Players[client].bIsReadyToSpray = true;
 		PrintToChat(client, "[SM] Your spray is ready!", g_Players[client].iSprayHeight);
 		return Plugin_Stop;
@@ -262,10 +265,13 @@ public void ForceDownloadPlayerSprayFile(int client)
 
 		CloseHandle(vtfFile);
 
-		LogToFile(g_strLogFile, "Adding late download %s", vtfCopypath);
-		AddFileToDownloadsTable(vtfCopypath);
-		AddLateDownload(vtfCopypath, false);
-		g_Players[client].bSprayHasBeenProcessed = true;
+		if (!g_Players[client].bSprayHasBeenProcessed) {
+			LogToFile(g_strLogFile, "Adding late download %s with %d clients", vtfCopypath, GetValidClientCount(true));
+			g_mapProcessedFiles.SetValue(vtfCopypath, GetValidClientCount(true));
+			AddFileToDownloadsTable(vtfCopypath);
+			AddLateDownload(vtfCopypath, false);
+			g_Players[client].bSprayHasBeenProcessed = true;
+		}
 	}
 }
 
@@ -384,8 +390,10 @@ public int WriteVMT(Spray spray)
 	Format(spray.sMaterialName, 64, "resizablespraysv2/%s_%s", playerdecalfile, scaleString);
 	Format(vmtFilename, 128, "materials/%s.vmt", spray.sMaterialName);
 
-	if (g_mapProcessedFiles.GetValue(vmtFilename, g_bBuffer))
+	if (g_mapProcessedFiles.GetValue(vmtFilename, g_bBuffer)) {
+		spray.fSprayTime = GetGameTime();
 		return g_SprayQueue.PushArray(spray);
+	}
 
 	if (!FileExists(vmtFilename, false)) {
 		File vmt = OpenFile(vmtFilename, "w+", false);
@@ -394,9 +402,11 @@ public int WriteVMT(Spray spray)
 		CloseHandle(vmt);
 	}
 
-	LogToFile(g_strLogFile, "Adding late download %s", vmtFilename);
+	LogToFile(g_strLogFile, "Adding late download %s with %d clients", vmtFilename, GetValidClientCount(true));
+	g_mapProcessedFiles.SetValue(vmtFilename, GetValidClientCount(true));
 	AddFileToDownloadsTable(vmtFilename);
 	AddLateDownload(vmtFilename, false);
+	spray.fSprayTime = GetGameTime();
 	return g_SprayQueue.PushArray(spray);
 }
 
@@ -407,6 +417,10 @@ public Action Timer_PrecacheAndSprayDecal(Handle timer, int sprayIndex)
 {
 	Spray spray;
 	g_SprayQueue.GetArray(sprayIndex, spray);
+
+	int iDownloadersLeftVTF = -1;
+	int iDownloadersLeftVMT = -1;
+	float timeWaiting = GetGameTime() - spray.fSprayTime;
 
 	char playerdecalfile[12];
 	char vtfFilename[PLATFORM_MAX_PATH];
@@ -422,7 +436,13 @@ public Action Timer_PrecacheAndSprayDecal(Handle timer, int sprayIndex)
 
 	Format(vmtFilename, sizeof(vmtFilename), "materials/%s.vmt", spray.sMaterialName);
 
-	if (g_mapProcessedFiles.GetValue(vtfFilename, g_bBuffer) && g_mapProcessedFiles.GetValue(vmtFilename, g_bBuffer)) {
+	g_mapProcessedFiles.GetValue(vtfFilename, iDownloadersLeftVTF);
+	g_mapProcessedFiles.GetValue(vmtFilename, iDownloadersLeftVMT);
+
+	if ((iDownloadersLeftVTF == 0 && iDownloadersLeftVMT == 0) || (timeWaiting > cv_fSprayTimeout.FloatValue > 0.0)) {
+
+		if (timeWaiting > cv_fSprayTimeout.FloatValue)
+			LogToFile(g_strLogFile, "%d clients did not download %s!", vmtFilename, iDownloadersLeftVMT);
 		spray.iPrecache = PrecacheDecal(spray.sMaterialName, false);
 		PlaceSpray(spray);
 		return Plugin_Stop;
@@ -523,6 +543,17 @@ stock bool IsValidClient(int client, bool nobots = true)
 		return false;
 
 	return IsClientInGame(client);
+}
+
+stock int GetValidClientCount(bool nobots = true)
+{
+	int count;
+
+	for (int c = 1; c <= MaxClients; c++)
+		if (IsValidClient(c, nobots))
+			count++;
+
+	return count;
 }
 
 /*
