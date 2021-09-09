@@ -22,16 +22,15 @@
 #define PLUGIN_NAME "Resizable Sprays"
 #define PLUGIN_DESC "Extends default sprays to allow for scaling and spamming"
 #define PLUGIN_AUTHOR "Sappykun"
-#define PLUGIN_VERSION "2.0.0-RC6"
+#define PLUGIN_VERSION "3.0.0-RC1"
 #define PLUGIN_URL "https://forums.alliedmods.net/showthread.php?t=332418"
 
 // Normal sprays are 64 Hammer units tall
 #define SPRAY_UNIT_DIMENSION_FLOAT 64.0
 
-// TODO: move this to a separate file
 char g_vmtTemplate[512] = "LightmappedGeneric\n\
 {\n\
-\t$basetexture \"resizablespraysv2/%s\"\n\
+\t$basetexture \"temp/%s\"\n\
 \t$decalscale %.4f\n\
 \t$spriteorientation 3\n\
 \t$spriteorigin \"[ 0.50 0.50 ]\"\n\
@@ -56,30 +55,35 @@ enum struct Player {
 	bool bSprayHasBeenProcessed;
 	bool bIsReadyToSpray;
 	int iSprayHeight;
-	float fScale;
+	float fScale; //last scale used
 	float fLastSprayed;
 	float fRealSprayLastPosition[3];
+	char sSprayFile[12];
+	char sSprayFilePath[PLATFORM_MAX_PATH];
+}
+
+enum struct Material {
+	int iReady;
+	int iPrecache; // Given precache ID
+	int iClientsSuccess[MAXPLAYERS + 1];
+	int iClientsFailure[MAXPLAYERS + 1];
+	float fScaleReal; // The real scale factor based on spray dimensions + clamping
 }
 
 enum struct Spray {
 	int iSprayer; // for sound emission
 	int iClient;
-	int iPrecache;
 	int iEntity;
 	int iHitbox;
 	int iDecalType;
-	int iSprayHeight;
 	float fSprayTime; // when was this request made
-	float fScaleReal; // The real scale factor based on spray dimensions + clamping
 	float fPosition[3];
 	char sMaterialName[64];
 }
 
 Player g_Players[MAXPLAYERS + 1];
 ArrayList g_SprayQueue;
-
-StringMap g_mapProcessedFiles;
-bool g_bBuffer;
+StringMap g_mapMaterials;
 
 ConVar cv_bEnabled;
 ConVar cv_sAdminFlags;
@@ -87,6 +91,7 @@ ConVar cv_fMaxSprayScale;
 ConVar cv_fMaxSprayDistance;
 ConVar cv_fDecalFrequency;
 ConVar cv_fSprayTimeout;
+ConVar cv_bAddVmtToDownloadsTable;
 
 char g_strLogFile[PLATFORM_MAX_PATH];
 
@@ -112,6 +117,9 @@ public void OnPluginStart()
 	cv_fMaxSprayScale = CreateConVar("rspr_maxsprayscale", "2.0", "Maximum scale for sprays.", FCVAR_NOTIFY, true, 0.0, false, 0.0);
 	cv_fDecalFrequency = CreateConVar("rspr_decalfrequency", "0.5", "Spray frequency for non-admins. 0 is no delay.", FCVAR_NOTIFY, true, 0.0, false);
 	cv_fSprayTimeout = CreateConVar("rspr_spraytimeout", "10.0", "Max time to wait for clients to download spray files. 0 to wait forever.", FCVAR_NOTIFY, true, 0.0, false);
+	cv_bAddVmtToDownloadsTable = CreateConVar("rspr_addvmttodownloadstable", "0.0", "Adds a spray file to the downloads table so new clients can see sprays. This should be 0 if your fastdl IP is not the same machine as your game server's IP' (which is usually the case).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+	AddTempEntHook("Player Decal", PlayerSprayReal);
 
 	AutoExecConfig(true, "resizablesprays");
 	LoadTranslations("common.phrases");
@@ -120,30 +128,44 @@ public void OnPluginStart()
 	FormatTime(timebuffer, sizeof(timebuffer), "%F", GetTime());
 	BuildPath(Path_SM, g_strLogFile, sizeof(g_strLogFile), "logs/rspr_%s.log", timebuffer);
 
-	if (!DirExists("materials/resizablespraysv2", false))
-		CreateDirectory("materials/resizablespraysv2", 511, false); // 511 decimal = 755 octal
+	if (!DirExists("materials/resizablespraysv3", false))
+		CreateDirectory("materials/resizablespraysv3", 511, false); // 511 decimal = 755 octal
 
-	for (int c = 1; c <= MaxClients; c++)
+	for (int c = 1; c <= MaxClients; c++) {
 		if (IsValidClient(c)) {
 			OnClientPostAdminCheck(c);
 		}
+	}
 }
 
 public void OnMapStart()
 {
-	g_mapProcessedFiles = new StringMap();
+	g_mapMaterials = new StringMap();
 	g_SprayQueue = new ArrayList(sizeof(Spray));
+}
+
+public Action PlayerSprayReal(const char[] szTempEntName, const int[] arrClients, int iClientCount, float flDelay) {
+	int client = TE_ReadNum("m_nPlayer");
+	if (IsValidClient(client))
+		TE_ReadVector("m_vecOrigin", g_Players[client].fRealSprayLastPosition);
 }
 
 public void OnDownloadSuccess(int iClient, char[] filename)
 {
+	Material material;
+	g_mapMaterials.GetArray(filename, material, sizeof(material));
+
 	if (iClient > 0) {
 		LogToFile(g_strLogFile, "%N downloaded file '%s'", iClient, filename);
+		material.iClientsFailure[iClient] = 0;
+		material.iClientsSuccess[iClient] = GetClientUserId(iClient);
+		g_mapMaterials.SetArray(filename, material, sizeof(material));
 		return;
 	}
 
+	material.iReady = 2;
+	g_mapMaterials.SetArray(filename, material, sizeof(material));
 	LogToFile(g_strLogFile, "All players downloaded file '%s'", filename);
-	g_mapProcessedFiles.SetValue(filename, true);
 }
 
 public void OnDownloadFailure(int iClient, char[] filename)
@@ -167,10 +189,11 @@ public void OnClientPostAdminCheck(int client)
 {
 	ResetSprayInfo(client);
 
-	if (!cv_bEnabled.BoolValue)
+	if (!cv_bEnabled.BoolValue || StrEqual(g_Players[client].sSprayFile, ""))
 		return;
 
 	PrintToChat(client, "[SM] Preparing your spray for resizing...");
+
 	CreateTimer(1.0, Timer_CheckIfSprayIsReady, client, TIMER_REPEAT);
 }
 
@@ -184,28 +207,23 @@ public void ResetSprayInfo(int client)
 	g_Players[client].fRealSprayLastPosition[0] = -16384.0;
 	g_Players[client].fRealSprayLastPosition[1] = -16384.0;
 	g_Players[client].fRealSprayLastPosition[2] = -16384.0;
+
+	// TODO: Compiler won't accept sizeof(g_Players[client].sSprayFile)
+	if (IsValidClient(client)) {
+		GetPlayerDecalFile(client, g_Players[client].sSprayFile, 12);
+		GetPlayerSprayFilePath(client, g_Players[client].sSprayFilePath, PLATFORM_MAX_PATH);
+	} else {
+		g_Players[client].sSprayFile = "";
+		g_Players[client].sSprayFilePath = "";
+	}
 }
 
 public Action Timer_CheckIfSprayIsReady(Handle timer, int client)
 {
-	bool bIsReadyVTF = false;
-
-	char playerdecalfile[12];
-	char vtfFilePath[PLATFORM_MAX_PATH];
-
 	if (!IsValidClient(client))
 		return Plugin_Continue;
 
-	GetPlayerDecalFile(client, playerdecalfile, sizeof(playerdecalfile));
-	Format(vtfFilePath, sizeof(vtfFilePath), "materials/resizablespraysv2/%s.vtf", playerdecalfile);
-
-	if (StrEqual(playerdecalfile, "")) {
-		PrintToChat(client, "[SM] You don't have a spray.");
-		return Plugin_Stop;
-	}
-
-	g_mapProcessedFiles.GetValue(vtfFilePath, bIsReadyVTF);
-	if (bIsReadyVTF && g_Players[client].bSprayHasBeenProcessed && !g_Players[client].bIsReadyToSpray) {
+	if (g_Players[client].bSprayHasBeenProcessed && !g_Players[client].bIsReadyToSpray) {
 		g_Players[client].bIsReadyToSpray = true;
 		PrintToChat(client, "[SM] Your spray is ready! Type /spray %d to make big sprays.", RoundToZero(cv_fMaxSprayScale.FloatValue));
 		return Plugin_Stop;
@@ -221,23 +239,14 @@ public void ForceDownloadPlayerSprayFile(int client)
 {
 	int dimensions[2] = {0, 0};
 
-	int buffer[4];
-	int bytesRead;
+	// TODO: This sucks and I hate it. Find a way to optimize this.
+	CreateTimer(0.0, Timer_PlaceRealSpray, client);
 
-	char playerdecalfile[12];
-	char vtfFilepath[PLATFORM_MAX_PATH];
-	char vtfCopypath[PLATFORM_MAX_PATH];
-
-	GetPlayerDecalFile(client, playerdecalfile, sizeof(playerdecalfile));
-	GetPlayerSprayFilePath(client, vtfFilepath, sizeof(vtfFilepath));
-
-	Format(vtfCopypath, sizeof(vtfCopypath), "materials/resizablespraysv2/%s.vtf", playerdecalfile);
-
-	if (!g_mapProcessedFiles.GetValue(vtfCopypath, g_bBuffer) || !g_Players[client].bSprayHasBeenProcessed) {
-		Handle vtfFile = OpenFile(vtfFilepath, "r", false);
+	if (!g_Players[client].bSprayHasBeenProcessed) {
+		Handle vtfFile = OpenFile(g_Players[client].sSprayFilePath, "r", false);
 
 		if (vtfFile == INVALID_HANDLE) {
-			//LogToFile(g_strLogFile, "ForceDownloadPlayerSprayFile: File %s returned an invalid handle.", vtfFilepath);
+			//LogToFile(g_strLogFile, "ForceDownloadPlayerSprayFile: File %s returned an invalid handle.", g_Players[client].sSprayFilePath);
 			return;
 		}
 
@@ -246,33 +255,23 @@ public void ForceDownloadPlayerSprayFile(int client)
 		g_Players[client].iSprayHeight = dimensions[1];
 
 		if (g_Players[client].iSprayHeight <= 0) {
-			LogToFile(g_strLogFile, "%N's spray %s was %d px, this isn't right...", client, vtfFilepath, g_Players[client].iSprayHeight);
+			LogToFile(g_strLogFile, "%N's spray %s was %d px, this isn't right...", client, g_Players[client].sSprayFilePath, g_Players[client].iSprayHeight);
 			return;
-		}
-
-		if (!FileExists(vtfCopypath, false)) {
-			// Copy VTF filepath to materials/temp/_______.vtf
-			Handle vtfCopy = OpenFile(vtfCopypath, "wb", false);
-
-			FileSeek(vtfFile, 0, SEEK_SET);
-			while (!IsEndOfFile(vtfFile)) {
-				bytesRead = ReadFile(vtfFile, buffer, sizeof(buffer), 1);
-				WriteFile(vtfCopy, buffer, bytesRead, 1);
-			}
-
-			CloseHandle(vtfCopy);
 		}
 
 		CloseHandle(vtfFile);
 
-		if (!g_Players[client].bSprayHasBeenProcessed) {
-			AddFileToDownloadsTable(vtfCopypath);
-			AddLateDownload(vtfCopypath, false);
-			g_mapProcessedFiles.SetValue(vtfCopypath, 0);
-			LogToFile(g_strLogFile, "Adding late download %s", vtfCopypath);
-			g_Players[client].bSprayHasBeenProcessed = true;
-		}
+		g_Players[client].bSprayHasBeenProcessed = true;
 	}
+}
+
+public Action Timer_PlaceRealSpray(Handle timer, int client)
+{
+	TE_Start("Player Decal");
+	TE_WriteVector("m_vecOrigin", g_Players[client].fRealSprayLastPosition);
+	TE_WriteNum("m_nEntity", 0);
+	TE_WriteNum("m_nPlayer", client);
+	TE_SendToAll();
 }
 
 /*
@@ -282,6 +281,7 @@ public void ForceDownloadPlayerSprayFile(int client)
 */
 public Action Command_Spray(int client, int args)
 {
+	float scaleReal;
 	char arg0[64]; GetCmdArg(0, arg0, sizeof(arg0));
 	char arg1[64]; GetCmdArg(1, arg1, sizeof(arg1));
 	char arg2[64]; GetCmdArg(2, arg2, sizeof(arg2));
@@ -327,18 +327,19 @@ public Action Command_Spray(int client, int args)
 	}
 
 	if (!g_Players[spray.iClient].bIsReadyToSpray) {
-			ReplyToCommand(client, "[SM] We're still preparing this spray! Please try again later.");
-			return Plugin_Handled;
-		}
+		ReplyToCommand(client, "[SM] We're still preparing this spray! Please try again later.");
+		return Plugin_Handled;
+	}
 
-	spray.fScaleReal = GetRealSprayScale(spray.iClient, g_Players[client].fScale);
+	scaleReal = GetRealSprayScale(spray.iClient, g_Players[client].fScale);
 
+	CreateTimer(0.0, Timer_PlaceRealSpray, client);
 	CalculateSprayPosition(client, spray);
 
 	if (spray.iEntity > -1) {
-		LogToFile(g_strLogFile, "Command_Spray: %N is spraying %N's spray at %0.4f (%0.4f) scale, size %d", client, spray.iClient, g_Players[client].fScale, spray.fScaleReal, g_Players[client].iSprayHeight);
+		LogToFile(g_strLogFile, "Command_Spray: %N is spraying %N's spray at %0.4f (%0.4f) scale, size %d", client, spray.iClient, g_Players[client].fScale, scaleReal, g_Players[client].iSprayHeight);
 		int sprayIndex;
-		if ((sprayIndex = WriteVMT(spray)) != -1)
+		if ((sprayIndex = WriteVMT(spray, scaleReal)) != -1)
 			CreateTimer(0.0, Timer_PrecacheAndSprayDecal, sprayIndex, TIMER_REPEAT);
 
 	} else {
@@ -367,8 +368,11 @@ float GetRealSprayScale(int client, float scale)
 	@param scale of decal for generated material
 	@param buffer for material name
 */
-public int WriteVMT(Spray spray)
+public int WriteVMT(Spray spray, float scaleReal)
 {
+	Material material;
+	material.fScaleReal = scaleReal;
+
 	char playerdecalfile[12];
 
 	char data[512];
@@ -377,16 +381,22 @@ public int WriteVMT(Spray spray)
 
 	GetPlayerDecalFile(spray.iClient, playerdecalfile, sizeof(playerdecalfile));
 
-	Format(data, 512, g_vmtTemplate, playerdecalfile, spray.fScaleReal);
+	Format(data, 512, g_vmtTemplate, playerdecalfile, scaleReal);
 
 	// Get rid of the period in float representation. Source engine doesn't like
 	// loading files with more than one . in the filename.
-	Format(scaleString, 16, "%.4f", spray.fScaleReal); ReplaceString(scaleString, 16, ".", "-", false);
+	Format(scaleString, 16, "%.4f", scaleReal); ReplaceString(scaleString, 16, ".", "-", false);
 
-	Format(spray.sMaterialName, 64, "resizablespraysv2/%s_%s", playerdecalfile, scaleString);
+	Format(spray.sMaterialName, 64, "resizablespraysv3/%s_%s", playerdecalfile, scaleString);
 	Format(vmtFilename, 128, "materials/%s.vmt", spray.sMaterialName);
 
-	if (g_mapProcessedFiles.GetValue(vmtFilename, g_bBuffer)) {
+	// Make new material if it doesn't exist
+	if (!g_mapMaterials.GetArray(vmtFilename, material, sizeof(material))) {
+		g_mapMaterials.SetArray(vmtFilename, material, sizeof(material));
+	}
+
+	// We've already processed this spray
+	if (material.iReady) {
 		spray.fSprayTime = GetGameTime();
 		return g_SprayQueue.PushArray(spray);
 	}
@@ -398,11 +408,21 @@ public int WriteVMT(Spray spray)
 		CloseHandle(vmt);
 	}
 
-	AddFileToDownloadsTable(vmtFilename);
-	AddLateDownload(vmtFilename, false);
-	g_mapProcessedFiles.SetValue(vmtFilename, 0);
-	spray.fSprayTime = GetGameTime();
+	if (cv_bAddVmtToDownloadsTable.BoolValue)
+		AddFileToDownloadsTable(vmtFilename);
+
 	LogToFile(g_strLogFile, "Adding late download %s", vmtFilename);
+	AddLateDownload(vmtFilename, false);
+
+	for (int c = 1; c <= MaxClients; c++) {
+		if (IsValidClient(c)) {
+			material.iClientsFailure[c] = GetClientUserId(c);
+		}
+	}
+	material.iReady = 1;
+	g_mapMaterials.SetArray(vmtFilename, material, sizeof(material));
+
+	spray.fSprayTime = GetGameTime();
 	return g_SprayQueue.PushArray(spray);
 }
 
@@ -412,43 +432,45 @@ public int WriteVMT(Spray spray)
 public Action Timer_PrecacheAndSprayDecal(Handle timer, int sprayIndex)
 {
 	// this shouldn't be necessary but it is
-	if (g_SprayQueue.Length > sprayIndex)
+	if (g_SprayQueue.Length < sprayIndex) {
+		LogToFile(g_strLogFile, "ERROR: Spray queue length is %d but we tried to spray %d!", g_SprayQueue.Length, sprayIndex);
 		return Plugin_Stop;
+	}
 
+	Material material;
 	Spray spray;
+	char vmtFilename[PLATFORM_MAX_PATH];
+
 	g_SprayQueue.GetArray(sprayIndex, spray);
 
-	bool bIsReadyVTF = false;
-	bool bIsReadyVMT = false;
-	float timeWaiting = GetGameTime() - spray.fSprayTime;
+	Format(vmtFilename, 128, "materials/%s.vmt", spray.sMaterialName);
 
-	char playerdecalfile[12];
-	char vtfFilename[PLATFORM_MAX_PATH];
-	char vmtFilename[PLATFORM_MAX_PATH];
+	if (!g_mapMaterials.GetArray(vmtFilename, material, sizeof(material)))
+	{
+		LogToFile(g_strLogFile, "############################");
+		LogToFile(g_strLogFile, "%s not in global array!", vmtFilename);
+		LogToFile(g_strLogFile, "############################");
+	}
+
+	float timeWaiting = GetGameTime() - spray.fSprayTime;
 
 	if (!IsValidClient(spray.iClient)) {
 		LogToFile(g_strLogFile, "Client %d is invalid! They most likely have left the server. Aborting spray operation.", spray.iClient);
 		return Plugin_Stop;
 	}
 
-	GetPlayerDecalFile(spray.iClient, playerdecalfile, sizeof(playerdecalfile));
-	Format(vtfFilename, sizeof(vtfFilename), "materials/resizablespraysv2/%s.vtf", playerdecalfile);
-
-	Format(vmtFilename, sizeof(vmtFilename), "materials/%s.vmt", spray.sMaterialName);
-
-	g_mapProcessedFiles.GetValue(vtfFilename, bIsReadyVTF);
-	g_mapProcessedFiles.GetValue(vmtFilename, bIsReadyVMT);
-
-	if ((bIsReadyVTF && bIsReadyVMT) || (timeWaiting > cv_fSprayTimeout.FloatValue > 0.0)) {
+	if (material.iReady == 2 || (timeWaiting > cv_fSprayTimeout.FloatValue > 0.0)) {
 
 		if (timeWaiting > cv_fSprayTimeout.FloatValue > 0.0) {
 			LogToFile(g_strLogFile, "Timed out waiting for all clients to download %s, precaching material anyways.", vmtFilename);
-			g_mapProcessedFiles.SetValue(vtfFilename, true);
-			g_mapProcessedFiles.SetValue(vmtFilename, true);
+			material.iReady = 2;
 		}
 
-		spray.iPrecache = PrecacheDecal(spray.sMaterialName, false);
+		material.iPrecache = PrecacheDecal(spray.sMaterialName, false);
+		g_mapMaterials.SetArray(vmtFilename, material, sizeof(material));
+
 		PlaceSpray(spray);
+
 		return Plugin_Stop;
 	}
 
@@ -505,6 +527,13 @@ public void CalculateSprayPosition(int client, Spray spray)
 */
 public void PlaceSpray(Spray spray)
 {
+	Material material;
+	char vmtFilename[PLATFORM_MAX_PATH];
+
+	Format(vmtFilename, 128, "materials/%s.vmt", spray.sMaterialName);
+
+	g_mapMaterials.GetArray(vmtFilename, material, sizeof(material));
+
 	switch (spray.iDecalType) {
 		case 0: {
 			TE_Start("Entity Decal");
@@ -512,19 +541,38 @@ public void PlaceSpray(Spray spray)
 			TE_WriteVector("m_vecStart", spray.fPosition);
 			TE_WriteNum("m_nEntity", spray.iEntity);
 			TE_WriteNum("m_nHitbox", spray.iHitbox);
-			TE_WriteNum("m_nIndex", spray.iPrecache);
-			TE_SendToAll();
+			TE_WriteNum("m_nIndex", material.iPrecache);
 		}
 		case 1: {
 			TE_Start("BSP Decal");
 			TE_WriteVector("m_vecOrigin", spray.fPosition);
 			TE_WriteNum("m_nEntity", spray.iEntity);
-			TE_WriteNum("m_nIndex", spray.iPrecache);
-			TE_SendToAll();
+			TE_WriteNum("m_nIndex", material.iPrecache);
 		}
 	}
 
-	EmitSoundToAll("player/sprayer.wav", spray.iSprayer, SNDCHAN_AUTO, SNDLEVEL_NORMAL, SND_NOFLAGS, 0.6);
+	int[] targets = new int[MaxClients];
+	int numTargets = 0;
+
+	if (cv_bAddVmtToDownloadsTable.BoolValue) {
+		// New clients have downloaded this already, so only exclude failed downloads
+		for (int c = 1; c <= MaxClients; c++) {
+			if (IsValidClient(c) && material.iClientsFailure[c] != GetClientUserId(c)) {
+				targets[numTargets++] = c;
+			}
+		}
+	} else {
+		// Only include successful downloads
+		for (int c = 1; c <= MaxClients; c++) {
+			if (IsValidClient(c) && material.iClientsSuccess[c] == GetClientUserId(c)) {
+				targets[numTargets++] = c;
+			}
+		}
+	}
+
+	TE_Send(targets, numTargets);
+
+	EmitSoundToAll("player/sprayer.wav", spray.iSprayer, SNDCHAN_AUTO, SNDLEVEL_NORMAL, SND_NOFLAGS, 0.5);
 
 	return;
 }
