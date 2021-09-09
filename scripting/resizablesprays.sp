@@ -22,7 +22,7 @@
 #define PLUGIN_NAME "Resizable Sprays"
 #define PLUGIN_DESC "Extends default sprays to allow for scaling and spamming"
 #define PLUGIN_AUTHOR "Sappykun"
-#define PLUGIN_VERSION "2.0.0-RC5"
+#define PLUGIN_VERSION "2.0.0-RC6"
 #define PLUGIN_URL "https://forums.alliedmods.net/showthread.php?t=332418"
 
 // Normal sprays are 64 Hammer units tall
@@ -113,8 +113,6 @@ public void OnPluginStart()
 	cv_fDecalFrequency = CreateConVar("rspr_decalfrequency", "0.5", "Spray frequency for non-admins. 0 is no delay.", FCVAR_NOTIFY, true, 0.0, false);
 	cv_fSprayTimeout = CreateConVar("rspr_spraytimeout", "10.0", "Max time to wait for clients to download spray files. 0 to wait forever.", FCVAR_NOTIFY, true, 0.0, false);
 
-	AddTempEntHook("Player Decal", PlayerSprayReal);
-
 	AutoExecConfig(true, "resizablesprays");
 	LoadTranslations("common.phrases");
 
@@ -172,7 +170,7 @@ public void OnClientPostAdminCheck(int client)
 	if (!cv_bEnabled.BoolValue)
 		return;
 
-	PrintToChat(client, "[SM] Preparing your spray...");
+	PrintToChat(client, "[SM] Preparing your spray for resizing...");
 	CreateTimer(1.0, Timer_CheckIfSprayIsReady, client, TIMER_REPEAT);
 }
 
@@ -207,9 +205,9 @@ public Action Timer_CheckIfSprayIsReady(Handle timer, int client)
 	}
 
 	g_mapProcessedFiles.GetValue(vtfFilePath, bIsReadyVTF);
-	if (bIsReadyVTF && g_Players[client].bSprayHasBeenProcessed) {
+	if (bIsReadyVTF && g_Players[client].bSprayHasBeenProcessed && !g_Players[client].bIsReadyToSpray) {
 		g_Players[client].bIsReadyToSpray = true;
-		PrintToChat(client, "[SM] Your spray is ready!");
+		PrintToChat(client, "[SM] Your spray is ready! Type /spray %d to make big sprays.", RoundToZero(cv_fMaxSprayScale.FloatValue));
 		return Plugin_Stop;
 	} else {
 		if (!g_Players[client].bSprayHasBeenProcessed)
@@ -275,13 +273,6 @@ public void ForceDownloadPlayerSprayFile(int client)
 			g_Players[client].bSprayHasBeenProcessed = true;
 		}
 	}
-}
-
-public Action PlayerSprayReal(const char[] szTempEntName, const int[] arrClients, int iClientCount, float flDelay) {
-	int client = TE_ReadNum("m_nPlayer");
-
-	if (IsValidClient(client))
-		TE_ReadVector("m_vecOrigin", g_Players[client].fRealSprayLastPosition);
 }
 
 /*
@@ -420,6 +411,10 @@ public int WriteVMT(Spray spray)
 */
 public Action Timer_PrecacheAndSprayDecal(Handle timer, int sprayIndex)
 {
+	// this shouldn't be necessary but it is
+	if (g_SprayQueue.Length > sprayIndex)
+		return Plugin_Stop;
+
 	Spray spray;
 	g_SprayQueue.GetArray(sprayIndex, spray);
 
@@ -432,7 +427,7 @@ public Action Timer_PrecacheAndSprayDecal(Handle timer, int sprayIndex)
 	char vmtFilename[PLATFORM_MAX_PATH];
 
 	if (!IsValidClient(spray.iClient)) {
-		LogToFile(g_strLogFile, "Client %d is invalid even though we verified it before! Aborting spray operation.", spray.iClient);
+		LogToFile(g_strLogFile, "Client %d is invalid! They most likely have left the server. Aborting spray operation.", spray.iClient);
 		return Plugin_Stop;
 	}
 
@@ -446,7 +441,7 @@ public Action Timer_PrecacheAndSprayDecal(Handle timer, int sprayIndex)
 
 	if ((bIsReadyVTF && bIsReadyVMT) || (timeWaiting > cv_fSprayTimeout.FloatValue > 0.0)) {
 
-		if (timeWaiting > cv_fSprayTimeout.FloatValue) {
+		if (timeWaiting > cv_fSprayTimeout.FloatValue > 0.0) {
 			LogToFile(g_strLogFile, "Timed out waiting for all clients to download %s, precaching material anyways.", vmtFilename);
 			g_mapProcessedFiles.SetValue(vtfFilename, true);
 			g_mapProcessedFiles.SetValue(vmtFilename, true);
