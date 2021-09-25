@@ -22,7 +22,7 @@
 #define PLUGIN_NAME "Resizable Sprays"
 #define PLUGIN_DESC "Extends default sprays to allow for scaling and spamming"
 #define PLUGIN_AUTHOR "Sappykun"
-#define PLUGIN_VERSION "3.0.0-RC1"
+#define PLUGIN_VERSION "3.0.0-RC2"
 #define PLUGIN_URL "https://forums.alliedmods.net/showthread.php?t=332418"
 
 // Normal sprays are 64 Hammer units tall
@@ -189,11 +189,13 @@ public void OnClientPostAdminCheck(int client)
 {
 	ResetSprayInfo(client);
 
-	if (!cv_bEnabled.BoolValue || StrEqual(g_Players[client].sSprayFile, ""))
+	if ((!cv_bEnabled.BoolValue) || StrEqual(g_Players[client].sSprayFile, "") || StrEqual(g_Players[client].sSprayFile, NULL_STRING))
 		return;
 
 	PrintToChat(client, "[SM] Preparing your spray for resizing...");
 
+	// DownloadCustomizations() is only called 30 seconds after a player joins
+	// the server for the first time. Therefore, wait 30 seconds.
 	CreateTimer(1.0, Timer_CheckIfSprayIsReady, client, TIMER_REPEAT);
 }
 
@@ -220,6 +222,7 @@ public void ResetSprayInfo(int client)
 
 public Action Timer_CheckIfSprayIsReady(Handle timer, int client)
 {
+	int test;
 	if (!IsValidClient(client))
 		return Plugin_Continue;
 
@@ -228,14 +231,19 @@ public Action Timer_CheckIfSprayIsReady(Handle timer, int client)
 		PrintToChat(client, "[SM] Your spray is ready! Type /spray %d to make big sprays.", RoundToZero(cv_fMaxSprayScale.FloatValue));
 		return Plugin_Stop;
 	} else {
-		if (!g_Players[client].bSprayHasBeenProcessed)
-			ForceDownloadPlayerSprayFile(client);
+		if (!g_Players[client].bSprayHasBeenProcessed) {
+			test = ForceDownloadPlayerSprayFile(client);
+			if (test == -1) {
+				LogToFile(g_strLogFile, "Killing timer for %N", client);
+				return Plugin_Stop;
+			}
+		}
 	}
 
 	return Plugin_Continue;
 }
 
-public void ForceDownloadPlayerSprayFile(int client)
+public int ForceDownloadPlayerSprayFile(int client)
 {
 	int dimensions[2] = {0, 0};
 
@@ -247,22 +255,23 @@ public void ForceDownloadPlayerSprayFile(int client)
 
 		if (vtfFile == INVALID_HANDLE) {
 			//LogToFile(g_strLogFile, "ForceDownloadPlayerSprayFile: File %s returned an invalid handle.", g_Players[client].sSprayFilePath);
-			return;
+			CloseHandle(vtfFile);
+			return 0;
 		}
 
 		FileSeek(vtfFile, 16, SEEK_SET);
 		ReadFile(vtfFile, dimensions, 2, 2);
 		g_Players[client].iSprayHeight = dimensions[1];
+		CloseHandle(vtfFile);
 
 		if (g_Players[client].iSprayHeight <= 0) {
-			LogToFile(g_strLogFile, "%N's spray %s was %d px, this isn't right...", client, g_Players[client].sSprayFilePath, g_Players[client].iSprayHeight);
-			return;
+			LogToFile(g_strLogFile, "%N's spray %s (%s) was %d px, this isn't right...", client, g_Players[client].sSprayFilePath, g_Players[client].sSprayFile, g_Players[client].iSprayHeight);
+			return -1;
 		}
-
-		CloseHandle(vtfFile);
 
 		g_Players[client].bSprayHasBeenProcessed = true;
 	}
+	return 0;
 }
 
 public Action Timer_PlaceRealSpray(Handle timer, int client)
@@ -402,8 +411,8 @@ public int WriteVMT(Spray spray, float scaleReal)
 	}
 
 	if (!FileExists(vmtFilename, false)) {
-		File vmt = OpenFile(vmtFilename, "w+", false);
-		if (vmt != null)
+		Handle vmt = OpenFile(vmtFilename, "w+", false);
+		if (vmt != INVALID_HANDLE)
 			WriteFileString(vmt, data, false);
 		CloseHandle(vmt);
 	}
