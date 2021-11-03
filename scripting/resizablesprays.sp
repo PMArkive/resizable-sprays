@@ -14,7 +14,7 @@
 
 #include <sourcemod>
 #include <sdktools>
-#include <latedl>
+#include <latedl2s>
 
 #pragma newdecls required
 #pragma semicolon 1
@@ -22,7 +22,7 @@
 #define PLUGIN_NAME "Resizable Sprays"
 #define PLUGIN_DESC "Extends default sprays to allow for scaling and spamming"
 #define PLUGIN_AUTHOR "Sappykun"
-#define PLUGIN_VERSION "3.0.0-RC2"
+#define PLUGIN_VERSION "3.0.0-RC3"
 #define PLUGIN_URL "https://forums.alliedmods.net/showthread.php?t=332418"
 
 // Normal sprays are 64 Hammer units tall
@@ -52,6 +52,7 @@ char g_vmtTemplate[512] = "LightmappedGeneric\n\
 }";
 
 enum struct Player {
+	StringMap DatQueue;
 	bool bSprayHasBeenProcessed;
 	bool bIsReadyToSpray;
 	int iSprayHeight;
@@ -91,9 +92,10 @@ ConVar cv_fMaxSprayScale;
 ConVar cv_fMaxSprayDistance;
 ConVar cv_fDecalFrequency;
 ConVar cv_fSprayTimeout;
-ConVar cv_bAddVmtToDownloadsTable;
 
 char g_strLogFile[PLATFORM_MAX_PATH];
+
+bool g_bBuffer; // Catch-all garbage buffer for StringMaps
 
 public Plugin myinfo =
 {
@@ -117,7 +119,6 @@ public void OnPluginStart()
 	cv_fMaxSprayScale = CreateConVar("rspr_maxsprayscale", "2.0", "Maximum scale for sprays.", FCVAR_NOTIFY, true, 0.0, false, 0.0);
 	cv_fDecalFrequency = CreateConVar("rspr_decalfrequency", "0.5", "Spray frequency for non-admins. 0 is no delay.", FCVAR_NOTIFY, true, 0.0, false);
 	cv_fSprayTimeout = CreateConVar("rspr_spraytimeout", "10.0", "Max time to wait for clients to download spray files. 0 to wait forever.", FCVAR_NOTIFY, true, 0.0, false);
-	cv_bAddVmtToDownloadsTable = CreateConVar("rspr_addvmttodownloadstable", "0.0", "Adds a spray file to the downloads table so new clients can see sprays. This should be 0 if your fastdl IP is not the same machine as your game server's IP' (which is usually the case).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	AddTempEntHook("Player Decal", PlayerSprayReal);
 
@@ -133,6 +134,7 @@ public void OnPluginStart()
 
 	for (int c = 1; c <= MaxClients; c++) {
 		if (IsValidClient(c)) {
+			OnClientConnected(c);
 			OnClientPostAdminCheck(c);
 		}
 	}
@@ -150,10 +152,20 @@ public Action PlayerSprayReal(const char[] szTempEntName, const int[] arrClients
 		TE_ReadVector("m_vecOrigin", g_Players[client].fRealSprayLastPosition);
 }
 
-public void OnDownloadSuccess(int iClient, char[] filename)
+public void OnDownloadSuccess(int iClient, const char[] filename)
 {
 	Material material;
-	g_mapMaterials.GetArray(filename, material, sizeof(material));
+	bool isSprayMaterial = g_mapMaterials.GetArray(filename, material, sizeof(material));
+
+	if (!isSprayMaterial) {
+		if (StrEqual(filename[strlen(filename)-4], ".dat") && iClient > 0) {
+			g_Players[iClient].DatQueue.GetValue(filename, g_bBuffer);
+			PlaceRealSprays();
+			g_Players[iClient].DatQueue.Remove(filename);
+			LogToFile(g_strLogFile, "%N received .dat file %s (%d left in queue).", iClient, filename, g_Players[iClient].DatQueue.Size);
+		}
+		return;
+	}
 
 	if (iClient > 0) {
 		LogToFile(g_strLogFile, "%N downloaded file '%s'", iClient, filename);
@@ -168,7 +180,8 @@ public void OnDownloadSuccess(int iClient, char[] filename)
 	LogToFile(g_strLogFile, "All players downloaded file '%s'", filename);
 }
 
-public void OnDownloadFailure(int iClient, char[] filename)
+// TODO: Take better action on download failure, if necessary
+public void OnDownloadFailure(int iClient, const char[] filename)
 {
 	if (iClient > 0) {
 		if (IsValidClient(iClient)) {
@@ -180,22 +193,62 @@ public void OnDownloadFailure(int iClient, char[] filename)
 	LogToFile(g_strLogFile, "Error adding '%s' to download queue", filename);
 }
 
+// We're hijacking the standard spray-sending procedure so we can track
+// progress of the .dat downloads
+public Action OnFileSend(int client, const char[] sFile)
+{
+	char downloadDir[PLATFORM_MAX_PATH];
+	Format(downloadDir, sizeof(downloadDir), "download/%s", sFile);
+
+	// Not a .dat file, could be anything.
+	if (!StrEqual(downloadDir[strlen(downloadDir)-4], ".dat")) {
+		return Plugin_Continue;
+	}
+
+	// We call AddLateDownload at the end, which immediately calls SendFile again
+	// File is already in the queue, so don't worry about it
+	if (g_Players[client].DatQueue.GetValue(sFile, g_bBuffer)) {
+		return Plugin_Continue;
+	}
+
+	// We could let the plugin continue here, but in this case we'll just get
+	// CreateFragmentsFromFile: 'filename' doesn't exist
+	// so we might as well stop now.
+	if (!FileExists(downloadDir)) {
+		PrintToServer("OnFileSend(%N): %s doesn't exist", client, downloadDir);
+		return Plugin_Handled;
+	}
+
+	g_Players[client].DatQueue.SetValue(sFile, true);
+	LogToFile(g_strLogFile, "OnFileSend: sending %s to %N (%d in queue)", sFile, client, g_Players[client].DatQueue.Size);
+	AddLateDownload(sFile, false, client, true);
+
+	return Plugin_Handled;
+}
+
 public void OnClientDisconnect(int client)
 {
 	ResetSprayInfo(client);
+}
+
+// Server will send files to clients BEFORE they have fully connected,
+// so we need to initialize the .dat queue as soon as we can.
+public void OnClientConnected(int client)
+{
+	CloseHandle(g_Players[client].DatQueue);
+	g_Players[client].DatQueue = new StringMap();
 }
 
 public void OnClientPostAdminCheck(int client)
 {
 	ResetSprayInfo(client);
 
+	// TODO: Is checking for both "" and NULL_STRING really necessary?
 	if ((!cv_bEnabled.BoolValue) || StrEqual(g_Players[client].sSprayFile, "") || StrEqual(g_Players[client].sSprayFile, NULL_STRING))
 		return;
 
 	PrintToChat(client, "[SM] Preparing your spray for resizing...");
 
-	// DownloadCustomizations() is only called 30 seconds after a player joins
-	// the server for the first time. Therefore, wait 30 seconds.
 	CreateTimer(1.0, Timer_CheckIfSprayIsReady, client, TIMER_REPEAT);
 }
 
@@ -222,6 +275,7 @@ public void ResetSprayInfo(int client)
 
 public Action Timer_CheckIfSprayIsReady(Handle timer, int client)
 {
+	// TODO: Fix the odd structure regarding int test
 	int test;
 	if (!IsValidClient(client))
 		return Plugin_Continue;
@@ -247,9 +301,6 @@ public int ForceDownloadPlayerSprayFile(int client)
 {
 	int dimensions[2] = {0, 0};
 
-	// TODO: This sucks and I hate it. Find a way to optimize this.
-	CreateTimer(0.0, Timer_PlaceRealSpray, client);
-
 	if (!g_Players[client].bSprayHasBeenProcessed) {
 		Handle vtfFile = OpenFile(g_Players[client].sSprayFilePath, "r", false);
 
@@ -262,6 +313,7 @@ public int ForceDownloadPlayerSprayFile(int client)
 		FileSeek(vtfFile, 16, SEEK_SET);
 		ReadFile(vtfFile, dimensions, 2, 2);
 		g_Players[client].iSprayHeight = dimensions[1];
+
 		CloseHandle(vtfFile);
 
 		if (g_Players[client].iSprayHeight <= 0) {
@@ -274,13 +326,15 @@ public int ForceDownloadPlayerSprayFile(int client)
 	return 0;
 }
 
-public Action Timer_PlaceRealSpray(Handle timer, int client)
+void PlaceRealSprays()
 {
-	TE_Start("Player Decal");
-	TE_WriteVector("m_vecOrigin", g_Players[client].fRealSprayLastPosition);
-	TE_WriteNum("m_nEntity", 0);
-	TE_WriteNum("m_nPlayer", client);
-	TE_SendToAll();
+	for (int i = 1; i <= MaxClients; i++) {
+		TE_Start("Player Decal");
+		TE_WriteVector("m_vecOrigin", g_Players[i].fRealSprayLastPosition);
+		TE_WriteNum("m_nEntity", 0);
+		TE_WriteNum("m_nPlayer", i);
+		TE_SendToAll();
+	}
 }
 
 /*
@@ -340,9 +394,9 @@ public Action Command_Spray(int client, int args)
 		return Plugin_Handled;
 	}
 
-	scaleReal = GetRealSprayScale(spray.iClient, g_Players[client].fScale);
+	scaleReal = GetRealSprayScale(client, spray.iClient, g_Players[client].fScale);
 
-	CreateTimer(0.0, Timer_PlaceRealSpray, client);
+	PlaceRealSprays();
 	CalculateSprayPosition(client, spray);
 
 	if (spray.iEntity > -1) {
@@ -358,17 +412,17 @@ public Action Command_Spray(int client, int args)
 	return Plugin_Handled;
 }
 
-float GetRealSprayScale(int client, float scale)
+float GetRealSprayScale(int sprayer, int owner, float scale)
 {
-	if (!IsAdmin(client) && scale > cv_fMaxSprayScale.FloatValue)
+	if (!IsAdmin(sprayer) && scale > cv_fMaxSprayScale.FloatValue)
 		scale = cv_fMaxSprayScale.FloatValue;
 
-	if (FloatEqual(g_Players[client].fScale, 0.0, 0.0001)) {
+	if (FloatEqual(g_Players[sprayer].fScale, 0.0, 0.0001)) {
 		scale = 1.0;
 	}
 
 	// We shouldn't be here if iSprayHeight is 0
-	return scale * SPRAY_UNIT_DIMENSION_FLOAT / float(g_Players[client].iSprayHeight);
+	return scale * SPRAY_UNIT_DIMENSION_FLOAT / float(g_Players[owner].iSprayHeight);
 }
 
 /*
@@ -417,15 +471,13 @@ public int WriteVMT(Spray spray, float scaleReal)
 		CloseHandle(vmt);
 	}
 
-	if (cv_bAddVmtToDownloadsTable.BoolValue)
-		AddFileToDownloadsTable(vmtFilename);
-
 	LogToFile(g_strLogFile, "Adding late download %s", vmtFilename);
-	AddLateDownload(vmtFilename, false);
 
 	for (int c = 1; c <= MaxClients; c++) {
 		if (IsValidClient(c)) {
 			material.iClientsFailure[c] = GetClientUserId(c);
+			if (g_Players[c].DatQueue.Size == 0)
+				AddLateDownload(vmtFilename, false, c);
 		}
 	}
 	material.iReady = 1;
@@ -563,25 +615,16 @@ public void PlaceSpray(Spray spray)
 	int[] targets = new int[MaxClients];
 	int numTargets = 0;
 
-	if (cv_bAddVmtToDownloadsTable.BoolValue) {
-		// New clients have downloaded this already, so only exclude failed downloads
-		for (int c = 1; c <= MaxClients; c++) {
-			if (IsValidClient(c) && material.iClientsFailure[c] != GetClientUserId(c)) {
-				targets[numTargets++] = c;
-			}
-		}
-	} else {
-		// Only include successful downloads
-		for (int c = 1; c <= MaxClients; c++) {
-			if (IsValidClient(c) && material.iClientsSuccess[c] == GetClientUserId(c)) {
-				targets[numTargets++] = c;
-			}
+	// Only include known successful downloads
+	for (int c = 1; c <= MaxClients; c++) {
+		if (IsValidClient(c) && material.iClientsSuccess[c] == GetClientUserId(c)) {
+			targets[numTargets++] = c;
 		}
 	}
 
 	TE_Send(targets, numTargets);
 
-	EmitSoundToAll("player/sprayer.wav", spray.iSprayer, SNDCHAN_AUTO, SNDLEVEL_NORMAL, SND_NOFLAGS, 0.5);
+	EmitSoundToAll("player/sprayer.wav", spray.iSprayer, SNDCHAN_AUTO, SNDLEVEL_NORMAL, SND_NOFLAGS, 0.35);
 
 	return;
 }
@@ -611,7 +654,7 @@ stock bool IsValidClient(int client, bool nobots = true)
 	@param client id
 	@return true if user is allowed to bypass restrictions, false otherwise
 */
-public bool IsAdmin(int client)
+stock bool IsAdmin(int client)
 {
 	char adminFlagsBuffer[16];
 	cv_sAdminFlags.GetString(adminFlagsBuffer, sizeof(adminFlagsBuffer));
@@ -619,13 +662,13 @@ public bool IsAdmin(int client)
 	return CheckCommandAccess(client, "", ReadFlagString(adminFlagsBuffer), false);
 }
 
-public bool FloatEqual(float a, float b, float error) {
+stock bool FloatEqual(float a, float b, float error) {
     return a - b < FloatAbs(error);
 }
 
 // Returns player spray save file into string buffer
 // Return value depends on engine
-public void GetPlayerSprayFilePath(int client, char[] buffer, int length)
+stock void GetPlayerSprayFilePath(int client, char[] buffer, int length)
 {
 	char strGame[PLATFORM_MAX_PATH];
 	char playerdecalfile[PLATFORM_MAX_PATH];
