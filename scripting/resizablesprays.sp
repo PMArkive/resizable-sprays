@@ -14,7 +14,7 @@
 
 #include <sourcemod>
 #include <sdktools>
-#include <latedl2s>
+#include <latedl>
 
 #pragma newdecls required
 #pragma semicolon 1
@@ -22,7 +22,7 @@
 #define PLUGIN_NAME "Resizable Sprays"
 #define PLUGIN_DESC "Extends default sprays to allow for scaling and spamming"
 #define PLUGIN_AUTHOR "Sappykun"
-#define PLUGIN_VERSION "3.0.0-RC3"
+#define PLUGIN_VERSION "3.0.0-RC4"
 #define PLUGIN_URL "https://forums.alliedmods.net/showthread.php?t=332418"
 
 // Normal sprays are 64 Hammer units tall
@@ -55,6 +55,7 @@ enum struct Player {
 	StringMap DatQueue;
 	bool bSprayHasBeenProcessed;
 	bool bIsReadyToSpray;
+	bool bTriedToSprayWhenDownloadingVtfs;
 	int iSprayHeight;
 	float fScale; //last scale used
 	float fLastSprayed;
@@ -67,7 +68,6 @@ enum struct Material {
 	int iReady;
 	int iPrecache; // Given precache ID
 	int iClientsSuccess[MAXPLAYERS + 1];
-	int iClientsFailure[MAXPLAYERS + 1];
 	float fScaleReal; // The real scale factor based on spray dimensions + clamping
 }
 
@@ -160,16 +160,22 @@ public void OnDownloadSuccess(int iClient, const char[] filename)
 	if (!isSprayMaterial) {
 		if (StrEqual(filename[strlen(filename)-4], ".dat") && iClient > 0) {
 			g_Players[iClient].DatQueue.GetValue(filename, g_bBuffer);
-			PlaceRealSprays();
 			g_Players[iClient].DatQueue.Remove(filename);
 			LogToFile(g_strLogFile, "%N received .dat file %s (%d left in queue).", iClient, filename, g_Players[iClient].DatQueue.Size);
+
+			// get client to copy .dat file to .vtf file locally
+			PlaceRealSprays();
+
+			if (g_Players[iClient].DatQueue.Size == 0 && g_Players[iClient].bTriedToSprayWhenDownloadingVtfs) {
+				g_Players[iClient].bTriedToSprayWhenDownloadingVtfs = false;
+				PrintToChat(iClient, "[SM] Your client has finished downloading spray files.");
+			}
 		}
 		return;
 	}
 
 	if (iClient > 0) {
 		LogToFile(g_strLogFile, "%N downloaded file '%s'", iClient, filename);
-		material.iClientsFailure[iClient] = 0;
 		material.iClientsSuccess[iClient] = GetClientUserId(iClient);
 		g_mapMaterials.SetArray(filename, material, sizeof(material));
 		return;
@@ -198,7 +204,11 @@ public void OnDownloadFailure(int iClient, const char[] filename)
 public Action OnFileSend(int client, const char[] sFile)
 {
 	char downloadDir[PLATFORM_MAX_PATH];
-	Format(downloadDir, sizeof(downloadDir), "download/%s", sFile);
+
+	if (StrContains(sFile, "user_custom", false) > 0)
+		Format(downloadDir, sizeof(downloadDir), "download/%s", sFile);
+	else
+		Format(downloadDir, sizeof(downloadDir), "%s", sFile);
 
 	// Not a .dat file, could be anything.
 	if (!StrEqual(downloadDir[strlen(downloadDir)-4], ".dat")) {
@@ -394,13 +404,19 @@ public Action Command_Spray(int client, int args)
 		return Plugin_Handled;
 	}
 
+	if (g_Players[client].DatQueue.Size > 0) {
+		g_Players[client].bTriedToSprayWhenDownloadingVtfs = true;
+		ReplyToCommand(client, "[SM] Your client is currently downloading spray files. Please try again later.");
+		return Plugin_Handled;
+	}
+
 	scaleReal = GetRealSprayScale(client, spray.iClient, g_Players[client].fScale);
 
 	PlaceRealSprays();
 	CalculateSprayPosition(client, spray);
 
 	if (spray.iEntity > -1) {
-		LogToFile(g_strLogFile, "Command_Spray: %N is spraying %N's spray at %0.4f (%0.4f) scale, size %d", client, spray.iClient, g_Players[client].fScale, scaleReal, g_Players[client].iSprayHeight);
+		LogToFile(g_strLogFile, "Command_Spray: %N is spraying %N's spray at %0.4f (%0.4f) scale, size %d", client, spray.iClient, g_Players[client].fScale, scaleReal, g_Players[spray.iClient].iSprayHeight);
 		int sprayIndex;
 		if ((sprayIndex = WriteVMT(spray, scaleReal)) != -1)
 			CreateTimer(0.0, Timer_PrecacheAndSprayDecal, sprayIndex, TIMER_REPEAT);
@@ -475,7 +491,6 @@ public int WriteVMT(Spray spray, float scaleReal)
 
 	for (int c = 1; c <= MaxClients; c++) {
 		if (IsValidClient(c)) {
-			material.iClientsFailure[c] = GetClientUserId(c);
 			if (g_Players[c].DatQueue.Size == 0)
 				AddLateDownload(vmtFilename, false, c);
 		}
