@@ -68,6 +68,7 @@ enum struct Material {
 	int iReady;
 	int iPrecache; // Given precache ID
 	int iClientsSuccess[MAXPLAYERS + 1];
+	int iClientsDownloadingCount;
 	float fScaleReal; // The real scale factor based on spray dimensions + clamping
 }
 
@@ -177,13 +178,16 @@ public void OnDownloadSuccess(int iClient, const char[] filename)
 	if (iClient > 0) {
 		LogToFile(g_strLogFile, "%N downloaded file '%s'", iClient, filename);
 		material.iClientsSuccess[iClient] = GetClientUserId(iClient);
+		
+		material.iClientsDownloadingCount--;
+		if (material.iClientsDownloadingCount == 0) {
+			material.iReady = 2;
+			LogToFile(g_strLogFile, "All players downloaded file '%s'", filename);
+		}
+		
 		g_mapMaterials.SetArray(filename, material, sizeof(material));
 		return;
 	}
-
-	material.iReady = 2;
-	g_mapMaterials.SetArray(filename, material, sizeof(material));
-	LogToFile(g_strLogFile, "All players downloaded file '%s'", filename);
 }
 
 // TODO: Take better action on download failure, if necessary
@@ -225,7 +229,7 @@ public Action OnFileSend(int client, const char[] sFile)
 	// CreateFragmentsFromFile: 'filename' doesn't exist
 	// so we might as well stop now.
 	if (!FileExists(downloadDir)) {
-		PrintToServer("OnFileSend(%N): %s doesn't exist", client, downloadDir);
+		//PrintToServer("OnFileSend(%N): %s doesn't exist", client, downloadDir);
 		return Plugin_Handled;
 	}
 
@@ -491,8 +495,10 @@ public int WriteVMT(Spray spray, float scaleReal)
 
 	for (int c = 1; c <= MaxClients; c++) {
 		if (IsValidClient(c)) {
-			if (g_Players[c].DatQueue.Size == 0)
+			if (g_Players[c].DatQueue.Size == 0) {
+				material.iClientsDownloadingCount++;
 				AddLateDownload(vmtFilename, false, c);
+			}
 		}
 	}
 	material.iReady = 1;
