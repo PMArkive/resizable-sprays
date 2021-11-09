@@ -647,8 +647,8 @@ public void PlaceSpray(Spray spray)
 	for (int c = 1; c <= MaxClients; c++) {
 		if (IsValidClient(c) && material.iClientsSuccess[c] == GetClientUserId(c)) {
 			targets[numTargets++] = c;
-			RSPR_Log(LOG_INFO, "PlaceSpray: adding %N for %N's spray", spray.iOwner, c);
-			PlaceRealPlayerLogo(client, client);
+			RSPR_Log(LOG_DEBUG, "PlaceSpray: adding %N for %N's spray", c, spray.iOwner);
+			PlaceRealPlayerLogo(spray.iOwner, c);
 		}
 	}
 
