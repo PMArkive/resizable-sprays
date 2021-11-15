@@ -22,7 +22,7 @@
 #define PLUGIN_NAME "Resizable Sprays"
 #define PLUGIN_DESC "Extends default sprays to allow for scaling and spamming"
 #define PLUGIN_AUTHOR "Sappykun"
-#define PLUGIN_VERSION "3.1.0"
+#define PLUGIN_VERSION "3.2.0"
 #define PLUGIN_URL "https://forums.alliedmods.net/showthread.php?t=332418"
 
 // Normal sprays are 64 Hammer units tall
@@ -63,6 +63,7 @@ enum struct Player {
 	bool bSprayHasBeenProcessed;
 	bool bIsReadyToSpray;
 	bool bTriedToSprayWhenDownloadingVtfs;
+	bool bTriedToSprayWhenSendingVtfs;
 	float fScale; //last scale used (in relative units)
 	float fLastSprayed;
 	float fRealSprayLastPosition[3];
@@ -75,22 +76,6 @@ enum struct Logo {
 	int iClientsWhoAreDownloadingDat[MAXPLAYERS + 1];
 	char sLogoFileShort[CRC_BUFFER_SIZE];
 	char sLogoFileFull[PLATFORM_MAX_PATH];
-	
-	int GetRequesterCount() {
-		int num = 0;
-		for (int i = 1; i <= MaxClients; i++)
-			if (this.iClientsWhoRequestedDat[i] != 0)
-				num++;
-		return num;
-	}
-	
-	int GetDownloaderCount() {
-		int num = 0;
-		for (int i = 1; i <= MaxClients; i++)
-			if (this.iClientsWhoAreDownloadingDat[i] != 0)
-				num++;
-		return num;
-	}
 }
 
 // Represents a given material pointing to a Logo
@@ -143,6 +128,7 @@ public void OnPluginStart()
 {
 	RegConsoleCmd("sm_spray", Command_Spray, "Places a repeatable, scalable version of your spray as a decal.");
 	RegConsoleCmd("sm_bspray", Command_Spray, "Places a repeatable, scalable version of your spray as a BSP decal.");
+	RegConsoleCmd("sm_sprayinfo", Command_SprayInfo, "Prints diagnostic info about the state RSPR thinks your spray is in.");
 
 	CreateConVar("rspr_version", PLUGIN_VERSION, "Resizable Sprays version. Don't touch this.", FCVAR_NOTIFY|FCVAR_DONTRECORD|FCVAR_SPONLY);
 
@@ -182,7 +168,7 @@ public void OnClientPostAdminCheck(int client)
 
 	PrintToChat(client, "[SM] Preparing your spray for resizing...");
 
-	CreateTimer(5.0, Timer_CheckIfSprayIsReady, client, TIMER_REPEAT);
+	CreateTimer(2.0, Timer_CheckIfSprayIsReady, client, TIMER_REPEAT);
 }
 
 public void ResetSprayInfo(int client)
@@ -190,16 +176,17 @@ public void ResetSprayInfo(int client)
 	g_Players[client].bIsReadyToSpray = false;
 	g_Players[client].bSprayHasBeenProcessed = false;
 	g_Players[client].bTriedToSprayWhenDownloadingVtfs = false;
+	g_Players[client].bTriedToSprayWhenSendingVtfs = false;
 	g_Players[client].fScale = 1.0;
 	g_Players[client].fLastSprayed = 0.0;
 	g_Players[client].fRealSprayLastPosition[0] = -16380.0;
 	g_Players[client].fRealSprayLastPosition[1] = -16380.0;
 	g_Players[client].fRealSprayLastPosition[2] = -16380.0;
-	
+
 	g_Logos[client].iHeight = 0;
 	g_Logos[client].sLogoFileShort = NULL_STRING;
 	g_Logos[client].sLogoFileFull = NULL_STRING;
-	
+
 	for (int c = 1; c <= MaxClients; c++) {
 		g_Logos[client].iClientsWhoRequestedDat[c] = 0;
 		g_Logos[client].iClientsWhoAreDownloadingDat[c] = 0;
@@ -219,7 +206,7 @@ public Action Timer_CheckIfSprayIsReady(Handle timer, int client)
 	if (!IsValidClient(client))
 		return Plugin_Stop;
 
-	if (g_Players[client].bSprayHasBeenProcessed && !g_Players[client].bIsReadyToSpray && g_Logos[client].GetRequesterCount() <= 0) {
+	if (g_Players[client].bSprayHasBeenProcessed && !g_Players[client].bIsReadyToSpray && GetRequesterCount(client) <= 0 && GetSprayQueueCount(client) <= 0) {
 		g_Players[client].bIsReadyToSpray = true;
 		PrintToChat(client, "[SM] Your spray is ready! Type /spray %d to make big sprays.", RoundToZero(cv_fMaxSprayScale.FloatValue));
 		return Plugin_Stop;
@@ -261,7 +248,7 @@ public bool ProcessPlayerLogoFile(int client)
 
 		g_Players[client].bSprayHasBeenProcessed = true;
 	}
-	
+
 	return true;
 }
 
@@ -285,7 +272,7 @@ void HandleDownloadConfirmation(int client, const char[] filename, bool success 
 
 	if (!isSprayMaterial) {
 		if (StrEqual(filename[strlen(filename)-4], ".dat") && client > 0) {
-			
+
 			if (!IsValidClient(iSprayOwner))
 				return;
 
@@ -298,41 +285,42 @@ void HandleDownloadConfirmation(int client, const char[] filename, bool success 
 			} else
 				RSPR_Log(LOG_DEBUG, "%N failed downloading .dat file %s.", client, filename);
 
-			// Still downloading spray files
-			for (int c = 1; c <= MaxClients; c++) {
-				if (g_Logos[c].iClientsWhoAreDownloadingDat[client] == GetClientUserId(client)) {
-					RSPR_Log(LOG_DEBUG, "HandleDownloadConfirmation: %N is still downloading %N's spray.", client, c);
-					return;
-				}
+			int queue = GetSprayQueueCount(client);
+			if (IsValidClient(client) && queue > 0) {
+				RSPR_Log(LOG_DEBUG, "HandleDownloadConfirmation: %N is still downloading %d sprays.", client, queue);
+				return;
 			}
 
-			if (g_Players[client].bTriedToSprayWhenDownloadingVtfs) {
+			if (IsValidClient(client) && g_Players[client].bTriedToSprayWhenDownloadingVtfs) {
 				g_Players[client].bTriedToSprayWhenDownloadingVtfs = false;
 				PrintToChat(client, "[SM] Your client has finished downloading spray files.");
 			}
-			
+
+			if (GetRequesterCount(iSprayOwner) <= 0 && g_Players[iSprayOwner].bTriedToSprayWhenSendingVtfs) {
+				g_Players[iSprayOwner].bTriedToSprayWhenSendingVtfs = false;
+				PrintToChat(iSprayOwner, "[SM] All clients have finished downloading your spray.");
+			}
 			return;
 		}
 	}
-	
+
 	if (client > 0) {
-		if (success)
+		if (success) {
 			RSPR_Log(LOG_DEBUG, "%N downloaded file '%s'", client, filename);
-		else
-			RSPR_Log(LOG_DEBUG, "%N failed downloading file '%s'", client, filename);
-			
-		material.iClientsSuccess[client] = GetClientUserId(client);
-		
+			material.iClientsSuccess[client] = GetClientUserId(client);
+		} else
+			RSPR_Log(LOG_DEBUG, "%c failed downloading file '%s'", client, filename);
+
 		material.iClientsDownloadingCount--;
 		if (material.iClientsDownloadingCount == 0) {
 			material.iReady = 2;
 			RSPR_Log(LOG_INFO, "All players downloaded file '%s'", filename);
 		}
-		
+
 		g_MaterialMap.SetArray(filename, material, sizeof(material));
 		return;
 	}
-	
+
 	if (!success)
 		RSPR_Log(LOG_INFO, "Error adding '%s' to download queue", filename);
 }
@@ -342,12 +330,12 @@ void HandleDownloadConfirmation(int client, const char[] filename, bool success 
 public Action OnFileSend(int client, const char[] sFile)
 {
 	int iSprayOwner = GetClientIdFromSprayFile(sFile);
-	
+
 	// Not a spray file, ignore.
 	if (!IsValidClient(iSprayOwner)) {
 		return Plugin_Continue;
 	}
-	
+
 	// Mark client as having requested this file
 	g_Logos[iSprayOwner].iClientsWhoRequestedDat[client] = GetClientUserId(client);
 
@@ -384,7 +372,9 @@ public Action Command_Spray(int client, int args)
 	char arg0[64]; GetCmdArg(0, arg0, sizeof(arg0));
 	char arg1[64]; GetCmdArg(1, arg1, sizeof(arg1));
 	char arg2[64]; GetCmdArg(2, arg2, sizeof(arg2));
+	char vmtFilename[PLATFORM_MAX_PATH];
 
+	Material material;
 	Spray spray;
 	spray.iSprayer = client;
 	spray.iOwner = client;
@@ -425,32 +415,120 @@ public Action Command_Spray(int client, int args)
 		}
 	}
 
-	if (!g_Players[spray.iOwner].bIsReadyToSpray || g_Logos[spray.iOwner].GetRequesterCount() > 0) {
+	if (!g_Players[spray.iOwner].bIsReadyToSpray) {
 		ReplyToCommand(client, "[SM] We're still preparing this spray! Please try again later.");
 		return Plugin_Handled;
 	}
 
-	for (int c = 1; c <= MaxClients; c++) {
-		if (g_Logos[c].iClientsWhoAreDownloadingDat[client] == GetClientUserId(client)) {
+	scaleReal = GetRealSprayScale(client, spray.iOwner, g_Players[client].fScale);
+	WriteVmtMaterialName(spray, scaleReal, vmtFilename, sizeof(vmtFilename));
+
+
+	if (!g_MaterialMap.GetArray(vmtFilename, material, sizeof(material))) {
+		int reqs = GetRequesterCount(spray.iOwner);
+		if (reqs > 0) {
+			if (spray.iOwner == client)
+				g_Players[client].bTriedToSprayWhenSendingVtfs = true;
+			ReplyToCommand(client, "[SM] There are still %d users trying to download this spray! Please try again later.", reqs);
+			return Plugin_Handled;
+		}
+
+		int queue = GetSprayQueueCount(client);
+		if (queue > 0) {
 			g_Players[client].bTriedToSprayWhenDownloadingVtfs = true;
-			ReplyToCommand(client, "[SM] Your client is currently downloading spray files. Please try again later.");
+			ReplyToCommand(client, "[SM] Your client is currently downloading %d spray files. Please try again later.", queue);
 			return Plugin_Handled;
 		}
 	}
-
-	scaleReal = GetRealSprayScale(client, spray.iOwner, g_Players[client].fScale);
 
 	CalculateSprayPosition(client, spray);
 
 	if (spray.iEntity > -1) {
 		RSPR_Log(LOG_INFO, "Command_Spray: %N is spraying %N's spray at %0.4f (%0.4f) scale, size %d", client, spray.iOwner, g_Players[client].fScale, scaleReal, g_Logos[spray.iOwner].iHeight);
 		int sprayIndex;
-		if ((sprayIndex = WriteVMT(spray, scaleReal)) != -1)
+		if ((sprayIndex = WriteVmt(spray, scaleReal)) != -1)
 			CreateTimer(0.0, Timer_PrecacheAndSprayDecal, sprayIndex, TIMER_REPEAT);
 
 	} else {
 		ReplyToCommand(client, "[SM] You are too far away from a valid surface to place a spray!");
 	}
+
+	return Plugin_Handled;
+}
+
+public Action Command_SprayInfo(int client, int args)
+{
+	int target = 0;
+
+	char arg1[64]; GetCmdArg(1, arg1, sizeof(arg1));
+
+	if (args > 2) {
+		if (IsAdmin(client))
+			ReplyToCommand(client, "Usage: !sm_sprayinfo [client]");
+		else
+			ReplyToCommand(client, "Usage: !sm_sprayinfo");
+		return Plugin_Handled;
+	}
+
+	if (IsAdmin(client) && !StrEqual(arg1, NULL_STRING)) {
+		target = FindTarget(client, arg1, true, false);
+		if (!IsValidClient(target))
+			return Plugin_Handled;
+	} else {
+		target = client;
+	}
+
+	// Worst case scenario is each client having a full 32 character name
+	// but accounting for that overflows Sourcemod's internal buffers
+
+	char sMessage[2048];
+	char sSendingTo[512];
+	char sRequestedFrom[512];
+	char sDownloadingFrom[36 + MAX_NAME_LENGTH];
+	int iDownloadingFrom;
+
+    // get requesters and downloaders of this user's spray
+	for (int c = 1; c <= MaxClients; c++) {
+		if (!IsValidClient(c)) continue;
+
+		if (g_Logos[target].iClientsWhoRequestedDat[c] == GetClientUserId(c))
+			if (StrEqual(sSendingTo, NULL_STRING))
+				GetClientName(c, sSendingTo, sizeof(sSendingTo));
+			else
+				Format(sSendingTo, sizeof(sSendingTo), "%s, %N", sSendingTo, c);
+
+		if (g_Logos[c].iClientsWhoRequestedDat[target] == GetClientUserId(target)) {
+			if (g_Logos[c].iClientsWhoAreDownloadingDat[target] == GetClientUserId(target))
+				iDownloadingFrom = c;
+			else if (StrEqual(sRequestedFrom, NULL_STRING))
+				GetClientName(c, sRequestedFrom, sizeof(sRequestedFrom));
+			else
+				Format(sRequestedFrom, sizeof(sRequestedFrom), "%s, %N", sRequestedFrom, c);
+		}
+    }
+
+	if (!StrEqual(sSendingTo, NULL_STRING))
+		Format(sSendingTo, sizeof(sSendingTo), "Downloading your spray: %s\n", sSendingTo);
+	if (!StrEqual(sRequestedFrom, NULL_STRING))
+		Format(sRequestedFrom, sizeof(sRequestedFrom), "Queued downloads: %s\n", sRequestedFrom);
+
+	if (iDownloadingFrom > 0)
+		Format(sDownloadingFrom, sizeof(sDownloadingFrom), "Currently downloading from: %N", iDownloadingFrom);
+
+	Format(sMessage, sizeof(sMessage), "%s%s%s", sSendingTo, sRequestedFrom, sDownloadingFrom);
+
+	if (StrEqual(sMessage, NULL_STRING))
+		Format(sMessage, sizeof(sMessage), "Nothing to report.");
+
+	ReplySource rs = GetCmdReplySource();
+
+	if (strlen(sMessage) > 128) {
+		PrintToChat(client, "[SM] See console for output.");
+		SetCmdReplySource(SM_REPLY_TO_CONSOLE);
+	}
+
+	ReplyToCommand(client, sMessage);
+	SetCmdReplySource(rs);
 
 	return Plugin_Handled;
 }
@@ -468,32 +546,35 @@ float GetRealSprayScale(int sprayer, int owner, float scale)
 	return scale * SPRAY_UNIT_DIMENSION_FLOAT / float(g_Logos[owner].iHeight);
 }
 
+public void WriteVmtMaterialName(Spray spray, float scaleReal, char[] buffer, int bufferSize)
+{
+	char scaleString[16];
+
+	// Get rid of the period in float representation. Source engine doesn't like
+	// loading files with more than one . in the filename.
+	Format(scaleString, 16, "%.4f", scaleReal); ReplaceString(scaleString, 16, ".", "-", false);
+	Format(spray.sMaterialName, 64, "resizablespraysv3/%s_%s", g_Logos[spray.iOwner].sLogoFileShort, scaleString);
+	Format(buffer, bufferSize, "materials/%s.vmt", spray.sMaterialName);
+}
+
 /*
 	Writes a VMT file to the server, then sends it to all available clients
 	@param ID of client, will use their spray's unique filename
 	@param scale of decal for generated material
 	@param buffer for material name
 */
-public int WriteVMT(Spray spray, float scaleReal)
+public int WriteVmt(Spray spray, float scaleReal)
 {
 	Material material;
-	material.fScaleReal = scaleReal;
-
-	char data[512];
-	char scaleString[16];
-	char vmtFilename[PLATFORM_MAX_PATH];
 	bool isDownloading = false;
+	char vmtFilename[PLATFORM_MAX_PATH];
+	char data[512];
 
+	material.fScaleReal = scaleReal;
 	Format(data, 512, g_vmtTemplate, g_Logos[spray.iOwner].sLogoFileShort, scaleReal);
-
-	// Get rid of the period in float representation. Source engine doesn't like
-	// loading files with more than one . in the filename.
-	Format(scaleString, 16, "%.4f", scaleReal); ReplaceString(scaleString, 16, ".", "-", false);
-
-	Format(spray.sMaterialName, 64, "resizablespraysv3/%s_%s", g_Logos[spray.iOwner].sLogoFileShort, scaleString);
 	Format(vmtFilename, 128, "materials/%s.vmt", spray.sMaterialName);
 
-	// Make new material if it doesn't exist
+			// Make new material if it doesn't exist
 	if (!g_MaterialMap.GetArray(vmtFilename, material, sizeof(material))) {
 		g_MaterialMap.SetArray(vmtFilename, material, sizeof(material));
 	}
@@ -518,14 +599,14 @@ public int WriteVMT(Spray spray, float scaleReal)
 		isDownloading = false;
 		for (int l = 1; l <= MaxClients; l++) {
 			if (g_Logos[l].iClientsWhoRequestedDat[c] == GetClientUserId(c)) {
-				RSPR_Log(LOG_DEBUG, "WriteVMT: %N is still downloading %l's spray", c, l);
+				RSPR_Log(LOG_DEBUG, "WriteVmt: %N is still downloading %i's spray", c, l);
 				isDownloading = true;
 				break;
 			}
 		}
 		if (!isDownloading) {
 			material.iClientsDownloadingCount++;
-			AddLateDownload(vmtFilename, false, c);	
+			AddLateDownload(vmtFilename, false, c);
 		}
 	}
 
@@ -735,7 +816,7 @@ stock void GetPlayerSprayFilePath(int client, int absolutePath = false, char[] b
 	}
 }
 
-stock void PlaceRealPlayerLogo(int owner, int recipient) 
+stock void PlaceRealPlayerLogo(int owner, int recipient)
 {
 	RSPR_Log(LOG_TRACE, "PlaceRealPlayerLogo(%d, %d)", owner, recipient);
 
@@ -755,17 +836,35 @@ stock int GetClientIdFromSprayFile(const char[] sprayFile)
 	for (int c = 1; c <= MaxClients; c++) {
 		if (!IsValidClient(c))
 			continue;
-		
+
 		GetPlayerSprayFilePath(c, false, buffer, sizeof(buffer));
-		
+
 		if (StrEqual(buffer, sprayFile)) {
 			RSPR_Log(LOG_TRACE, "GetClientIdFromSprayFile(%s): client %N", sprayFile, c);
 			return c;
 		}
 	}
-	
+
 	//RSPR_Log(LOG_TRACE, "GetClientIdFromSprayFile(%s): Failed", sprayFile);
 	return -1;
+}
+
+public int GetSprayQueueCount(int client)
+{
+	int num = 0;
+	for (int c = 1; c <= MaxClients; c++)
+		if (g_Logos[c].iClientsWhoAreDownloadingDat[client] == GetClientUserId(client))
+			num++;
+	return num;
+}
+
+public int GetRequesterCount(int client)
+{
+	int num = 0;
+	for (int c = 1; c <= MaxClients; c++)
+		if (IsValidClient(c) && g_Logos[client].iClientsWhoAreDownloadingDat[c] == GetClientUserId(c))
+			num++;
+	return num;
 }
 
 public Action PlayerSprayReal(const char[] szTempEntName, const int[] arrClients, int iClientCount, float flDelay) {
