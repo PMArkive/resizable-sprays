@@ -22,7 +22,7 @@
 #define PLUGIN_NAME "Resizable Sprays"
 #define PLUGIN_DESC "Extends default sprays to allow for scaling and spamming"
 #define PLUGIN_AUTHOR "Sappykun"
-#define PLUGIN_VERSION "3.2.0"
+#define PLUGIN_VERSION "3.2.1"
 #define PLUGIN_URL "https://forums.alliedmods.net/showthread.php?t=332418"
 
 // Normal sprays are 64 Hammer units tall
@@ -566,7 +566,6 @@ public void WriteVmtMaterialName(Spray spray, float scaleReal, char[] buffer, in
 public int WriteVmt(Spray spray, float scaleReal)
 {
 	Material material;
-	bool isDownloading = false;
 	char vmtFilename[PLATFORM_MAX_PATH];
 	char data[512];
 
@@ -596,15 +595,13 @@ public int WriteVmt(Spray spray, float scaleReal)
 
 	for (int c = 1; c <= MaxClients; c++) {
 		if (!IsValidClient(c)) continue;
-		isDownloading = false;
-		for (int l = 1; l <= MaxClients; l++) {
-			if (g_Logos[l].iClientsWhoRequestedDat[c] == GetClientUserId(c)) {
-				RSPR_Log(LOG_DEBUG, "WriteVmt: %N is still downloading %i's spray", c, l);
-				isDownloading = true;
-				break;
-			}
-		}
-		if (!isDownloading) {
+
+		int count = GetSprayQueueCount(c);
+
+		if (count > 0) {
+			RSPR_Log(LOG_DEBUG, "WriteVmt: %N is still downloading %d sprays.", c, count);
+		} else {
+			RSPR_Log(LOG_DEBUG, "WriteVmt: %N isn't downloading any sprays.", c);
 			material.iClientsDownloadingCount++;
 			AddLateDownload(vmtFilename, false, c);
 		}
@@ -853,7 +850,7 @@ public int GetSprayQueueCount(int client)
 {
 	int num = 0;
 	for (int c = 1; c <= MaxClients; c++)
-		if (g_Logos[c].iClientsWhoAreDownloadingDat[client] == GetClientUserId(client))
+		if (IsValidClient(client) && g_Logos[c].iClientsWhoAreDownloadingDat[client] == GetClientUserId(client))
 			num++;
 	return num;
 }
