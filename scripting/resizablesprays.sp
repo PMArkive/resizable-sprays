@@ -22,7 +22,7 @@
 #define PLUGIN_NAME "Resizable Sprays"
 #define PLUGIN_DESC "Extends default sprays to allow for scaling and spamming"
 #define PLUGIN_AUTHOR "Sappykun"
-#define PLUGIN_VERSION "3.2.1"
+#define PLUGIN_VERSION "3.3.0"
 #define PLUGIN_URL "https://forums.alliedmods.net/showthread.php?t=332418"
 
 // Normal sprays are 64 Hammer units tall
@@ -63,9 +63,9 @@ enum struct Player {
 	bool bSprayHasBeenProcessed;
 	bool bIsReadyToSpray;
 	bool bTriedToSprayWhenDownloadingVtfs;
-	bool bTriedToSprayWhenSendingVtfs;
 	float fScale; //last scale used (in relative units)
 	float fLastSprayed;
+	float fJoinTime;
 	float fRealSprayLastPosition[3];
 }
 
@@ -76,6 +76,7 @@ enum struct Logo {
 	int iClientsWhoAreDownloadingDat[MAXPLAYERS + 1];
 	char sLogoFileShort[CRC_BUFFER_SIZE];
 	char sLogoFileFull[PLATFORM_MAX_PATH];
+	float fLogoPrecacheTime;
 }
 
 // Represents a given material pointing to a Logo
@@ -176,14 +177,15 @@ public void ResetSprayInfo(int client)
 	g_Players[client].bIsReadyToSpray = false;
 	g_Players[client].bSprayHasBeenProcessed = false;
 	g_Players[client].bTriedToSprayWhenDownloadingVtfs = false;
-	g_Players[client].bTriedToSprayWhenSendingVtfs = false;
 	g_Players[client].fScale = 1.0;
 	g_Players[client].fLastSprayed = 0.0;
+	g_Players[client].fJoinTime = GetGameTime();
 	g_Players[client].fRealSprayLastPosition[0] = -16380.0;
 	g_Players[client].fRealSprayLastPosition[1] = -16380.0;
 	g_Players[client].fRealSprayLastPosition[2] = -16380.0;
 
 	g_Logos[client].iHeight = 0;
+	g_Logos[client].fLogoPrecacheTime = 0.0;
 	g_Logos[client].sLogoFileShort = NULL_STRING;
 	g_Logos[client].sLogoFileFull = NULL_STRING;
 
@@ -206,7 +208,7 @@ public Action Timer_CheckIfSprayIsReady(Handle timer, int client)
 	if (!IsValidClient(client))
 		return Plugin_Stop;
 
-	if (g_Players[client].bSprayHasBeenProcessed && !g_Players[client].bIsReadyToSpray && GetRequesterCount(client) <= 0 && GetSprayQueueCount(client) <= 0) {
+	if (g_Players[client].bSprayHasBeenProcessed && !g_Players[client].bIsReadyToSpray && GetSprayQueueCount(client) <= 0) {
 		g_Players[client].bIsReadyToSpray = true;
 		PrintToChat(client, "[SM] Your spray is ready! Type /spray %d to make big sprays.", RoundToZero(cv_fMaxSprayScale.FloatValue));
 		return Plugin_Stop;
@@ -296,10 +298,6 @@ void HandleDownloadConfirmation(int client, const char[] filename, bool success 
 				PrintToChat(client, "[SM] Your client has finished downloading spray files.");
 			}
 
-			if (GetRequesterCount(iSprayOwner) <= 0 && g_Players[iSprayOwner].bTriedToSprayWhenSendingVtfs) {
-				g_Players[iSprayOwner].bTriedToSprayWhenSendingVtfs = false;
-				PrintToChat(iSprayOwner, "[SM] All clients have finished downloading your spray.");
-			}
 			return;
 		}
 	}
@@ -423,16 +421,8 @@ public Action Command_Spray(int client, int args)
 	scaleReal = GetRealSprayScale(client, spray.iOwner, g_Players[client].fScale);
 	WriteVmtMaterialName(spray, scaleReal, vmtFilename, sizeof(vmtFilename));
 
-
 	if (!g_MaterialMap.GetArray(vmtFilename, material, sizeof(material))) {
-		int reqs = GetRequesterCount(spray.iOwner);
-		if (reqs > 0) {
-			if (spray.iOwner == client)
-				g_Players[client].bTriedToSprayWhenSendingVtfs = true;
-			ReplyToCommand(client, "[SM] There are still %d users trying to download this spray! Please try again later.", reqs);
-			return Plugin_Handled;
-		}
-
+		// Client's netchannel is in use
 		int queue = GetSprayQueueCount(client);
 		if (queue > 0) {
 			g_Players[client].bTriedToSprayWhenDownloadingVtfs = true;
@@ -650,6 +640,9 @@ public Action Timer_PrecacheAndSprayDecal(Handle timer, int sprayIndex)
 			material.iReady = 2;
 		}
 
+		if (g_Logos[spray.iOwner].fLogoPrecacheTime == 0.0)
+			g_Logos[spray.iOwner].fLogoPrecacheTime = GetGameTime();
+
 		material.iPrecache = PrecacheDecal(spray.sMaterialName, false);
 		g_MaterialMap.SetArray(vmtFilename, material, sizeof(material));
 
@@ -723,7 +716,9 @@ public void PlaceSpray(Spray spray)
 
 	// Only include known successful downloads
 	for (int c = 1; c <= MaxClients; c++) {
-		if (IsValidClient(c) && material.iClientsSuccess[c] == GetClientUserId(c)) {
+		if (IsValidClient(c)
+		&& material.iClientsSuccess[c] == GetClientUserId(c)
+		&& g_Logos[spray.iOwner].fLogoPrecacheTime > g_Players[c].fJoinTime) {
 			targets[numTargets++] = c;
 			RSPR_Log(LOG_DEBUG, "PlaceSpray: adding %N for %N's spray", c, spray.iOwner);
 			PlaceRealPlayerLogo(spray.iOwner, c);
@@ -851,15 +846,6 @@ public int GetSprayQueueCount(int client)
 	int num = 0;
 	for (int c = 1; c <= MaxClients; c++)
 		if (IsValidClient(client) && g_Logos[c].iClientsWhoAreDownloadingDat[client] == GetClientUserId(client))
-			num++;
-	return num;
-}
-
-public int GetRequesterCount(int client)
-{
-	int num = 0;
-	for (int c = 1; c <= MaxClients; c++)
-		if (IsValidClient(c) && g_Logos[client].iClientsWhoAreDownloadingDat[c] == GetClientUserId(c))
 			num++;
 	return num;
 }
