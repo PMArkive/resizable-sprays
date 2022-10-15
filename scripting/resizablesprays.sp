@@ -22,7 +22,7 @@
 #define PLUGIN_NAME "Resizable Sprays"
 #define PLUGIN_DESC "Extends default sprays to allow for scaling and spamming"
 #define PLUGIN_AUTHOR "Sappykun"
-#define PLUGIN_VERSION "3.3.0"
+#define PLUGIN_VERSION "3.4.0"
 #define PLUGIN_URL "https://forums.alliedmods.net/showthread.php?t=332418"
 
 // Normal sprays are 64 Hammer units tall
@@ -108,8 +108,8 @@ StringMap g_MaterialMap;
 
 ConVar cv_bEnabled;
 ConVar cv_iLogLevel;
-ConVar cv_sAdminFlags;
 ConVar cv_fMaxSprayScale;
+ConVar cv_fMaxSprayScaleAbsolute;
 ConVar cv_fMaxSprayDistance;
 ConVar cv_fDecalFrequency;
 ConVar cv_fSprayTimeout;
@@ -135,9 +135,9 @@ public void OnPluginStart()
 
 	cv_bEnabled = CreateConVar("rspr_enabled", "1.0", "Enables the plugin.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	cv_iLogLevel = CreateConVar("rspr_loglevel", "2", "Logging level. Higher number = more console spam.", FCVAR_NONE, false, 0.0, false, 0.0);
-	cv_sAdminFlags = CreateConVar("rspr_adminflags", "b", "Admin flags required to bypass restrictions", FCVAR_NONE, false, 0.0, false, 0.0);
 	cv_fMaxSprayDistance = CreateConVar("rspr_maxspraydistance", "128.0", "Max range for placing decals. 0 is infinite range", FCVAR_NOTIFY, true, 0.0, false);
-	cv_fMaxSprayScale = CreateConVar("rspr_maxsprayscale", "2.0", "Maximum scale for sprays.", FCVAR_NOTIFY, true, 0.0, false, 0.0);
+	cv_fMaxSprayScale = CreateConVar("rspr_maxsprayscale", "2.0", "Maximum scale for sprays for regular players.", FCVAR_NOTIFY, true, 0.0, false, 0.0);
+	cv_fMaxSprayScaleAbsolute = CreateConVar("rspr_maxsprayscale_absolute", "32.0", "Maximum scale for sprays for admins.", FCVAR_NOTIFY, true, 0.0, false, 0.0);
 	cv_fDecalFrequency = CreateConVar("rspr_decalfrequency", "0.5", "Spray frequency for non-admins. 0 is no delay.", FCVAR_NOTIFY, true, 0.0, false);
 	cv_fSprayTimeout = CreateConVar("rspr_spraytimeout", "10.0", "Max time to wait for clients to download spray files. 0 to wait forever.", FCVAR_NOTIFY, true, 0.0, false);
 
@@ -194,10 +194,9 @@ public void ResetSprayInfo(int client)
 		g_Logos[client].iClientsWhoAreDownloadingDat[c] = 0;
 	}
 
-	// TODO: Compiler won't accept sizeof(g_Players[client].sSprayFile)
 	if (IsValidClient(client)) {
-		GetPlayerDecalFile(client, g_Logos[client].sLogoFileShort, CRC_BUFFER_SIZE);
-		GetPlayerSprayFilePath(client, false, g_Logos[client].sLogoFileFull, PLATFORM_MAX_PATH);
+		GetPlayerDecalFile(client, g_Logos[client].sLogoFileShort, sizeof(g_Logos[].sLogoFileShort));
+		GetPlayerSprayFilePath(client, false, g_Logos[client].sLogoFileFull, sizeof(g_Logos[].sLogoFileFull));
 		RSPR_Log(LOG_DEBUG, "ResetSprayInfo (%N): Spray file path is %s", client, g_Logos[client].sLogoFileFull);
 		PlaceRealPlayerLogo(client, client);
 	}
@@ -281,6 +280,9 @@ void HandleDownloadConfirmation(int client, const char[] filename, bool success 
 			g_Logos[iSprayOwner].iClientsWhoRequestedDat[client] = 0;
 			g_Logos[iSprayOwner].iClientsWhoAreDownloadingDat[client] = 0;
 
+			if (!IsValidClient(client))
+				return;
+
 			if (success) {
 				RSPR_Log(LOG_DEBUG, "%N received .dat file %s.", client, filename);
 				PlaceRealPlayerLogo(iSprayOwner, client);
@@ -333,6 +335,10 @@ public Action OnFileSend(int client, const char[] sFile)
 	if (!IsValidClient(iSprayOwner)) {
 		return Plugin_Continue;
 	}
+
+	if (!IsValidClient(client)) {
+                return Plugin_Continue;
+        }
 
 	// Mark client as having requested this file
 	g_Logos[iSprayOwner].iClientsWhoRequestedDat[client] = GetClientUserId(client);
@@ -527,6 +533,9 @@ float GetRealSprayScale(int sprayer, int owner, float scale)
 {
 	if (!IsAdmin(sprayer) && scale > cv_fMaxSprayScale.FloatValue)
 		scale = cv_fMaxSprayScale.FloatValue;
+
+	if (scale > cv_fMaxSprayScaleAbsolute.FloatValue)
+		scale = cv_fMaxSprayScaleAbsolute.FloatValue;
 
 	if (FloatEqual(g_Players[sprayer].fScale, 0.0, 0.001)) {
 		scale = 1.0;
@@ -776,10 +785,7 @@ stock bool IsValidClient(int client, bool nobots = true)
 */
 stock bool IsAdmin(int client)
 {
-	char adminFlagsBuffer[16];
-	cv_sAdminFlags.GetString(adminFlagsBuffer, sizeof(adminFlagsBuffer));
-
-	return CheckCommandAccess(client, "", ReadFlagString(adminFlagsBuffer), false);
+	return CheckCommandAccess(client, "rspr_adminoverride", ADMFLAG_KICK, false);
 }
 
 stock bool FloatEqual(float a, float b, float error) {
@@ -854,6 +860,7 @@ public Action PlayerSprayReal(const char[] szTempEntName, const int[] arrClients
 	int client = TE_ReadNum("m_nPlayer");
 	if (IsValidClient(client))
 		TE_ReadVector("m_vecOrigin", g_Players[client].fRealSprayLastPosition);
+	return Plugin_Continue;
 }
 
 void RSPR_Log(int level, char [] format, any ...) {
