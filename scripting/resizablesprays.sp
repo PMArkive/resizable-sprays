@@ -150,8 +150,11 @@ public void OnPluginStart()
 	FormatTime(timebuffer, sizeof(timebuffer), "%F", GetTime());
 	BuildPath(Path_SM, g_strLogFile, sizeof(g_strLogFile), "logs/rspr_%s.log", timebuffer);
 
+	if (!DirExists("materials", false))
+		CreateDirectory("materials", 511, false); // 511 decimal = 755 octal
+
 	if (!DirExists("materials/resizablespraysv3", false))
-		CreateDirectory("materials/resizablespraysv3", 511, false); // 511 decimal = 755 octal
+		CreateDirectory("materials/resizablespraysv3", 511, false);
 }
 
 public void OnMapStart()
